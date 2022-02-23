@@ -85,15 +85,15 @@ static Key keys[] = {
 	{ MODKEY,                       XK_period, focusmon,       {.i = +1 } },
 	{ MODKEY|ShiftMask,             XK_comma,  tagmon,         {.i = -1 } },
 	{ MODKEY|ShiftMask,             XK_period, tagmon,         {.i = +1 } },
-	TAGKEYS(                        XK_1,                      0)
-	TAGKEYS(                        XK_2,                      1)
-	TAGKEYS(                        XK_3,                      2)
-	TAGKEYS(                        XK_4,                      3)
-	TAGKEYS(                        XK_5,                      4)
-	TAGKEYS(                        XK_6,                      5)
-	TAGKEYS(                        XK_7,                      6)
-	TAGKEYS(                        XK_8,                      7)
-	TAGKEYS(                        XK_9,                      8)
+	TAGKEYS(                        XK_quotedbl,               0)
+	TAGKEYS(                        XK_guillemotleft,          1)
+	TAGKEYS(                        XK_guillemotright,         2)
+	TAGKEYS(                        XK_parenleft,              3)
+	TAGKEYS(                        XK_parenright,             4)
+	TAGKEYS(                        XK_at,                     5)
+	TAGKEYS(                        XK_plus,                   6)
+	TAGKEYS(                        XK_minus,                  7)
+	TAGKEYS(                        XK_slash,                  8)
 	{ MODKEY|ShiftMask,             XK_q,      quit,           {0} },
 };
 

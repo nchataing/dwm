@@ -190,6 +190,8 @@ static void focus(Client *c);
 static void focusin(XEvent *e);
 static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
+static void f1switchfocus(const Arg *arg);
+static void clickswitch(const Arg *arg);
 static Atom getatomprop(Client *c, Atom prop);
 static int getrootptr(int *x, int *y);
 static long getstate(Window w);
@@ -289,7 +291,7 @@ static void (*handler[LASTEvent]) (XEvent *) = {
 	[MapRequest] = maprequest,
 	[MotionNotify] = motionnotify,
 	[PropertyNotify] = propertynotify,
-    [ResizeRequest] = resizerequest,
+        [ResizeRequest] = resizerequest,
 	[UnmapNotify] = unmapnotify
 };
 static Atom wmatom[WMLast], netatom[NetLast], xatom[XLast];
@@ -2488,6 +2490,82 @@ zoom(const Arg *arg)
 			return;
 	pop(c);
 }
+
+void
+fakekeypress(KeySym keysym)
+{
+  // Create and setting up the event
+  XEvent event;
+  memset (&event, 0, sizeof (event));
+  event.xkey.keycode = XKeysymToKeycode(dpy, keysym);
+  event.xkey.same_screen = True;
+  event.xkey.subwindow = root; 
+  while (event.xkey.subwindow)
+    {
+      event.xkey.window = event.xkey.subwindow;
+      XQueryPointer (dpy, event.xkey.window,
+		     &event.xkey.root, &event.xkey.subwindow,
+		     &event.xkey.x_root, &event.xkey.y_root,
+		     &event.xkey.x, &event.xkey.y,
+		     &event.xkey.state);
+    }
+  // Press
+  event.type = KeyPress;
+  if (XSendEvent (dpy, PointerWindow, True, KeyPressMask, &event) == 0)
+    fprintf (stderr, "Error to send the event!\n");
+  XFlush (dpy);
+  usleep (1);
+  // Release
+  event.type = KeyRelease;
+  if (XSendEvent (dpy, PointerWindow, True, ButtonReleaseMask, &event) == 0)
+    fprintf (stderr, "Error to send the event!\n");
+  XFlush (dpy);
+  usleep (1);
+}
+
+void
+f1switchfocus(const Arg *arg)
+{
+    fakekeypress(XK_F1);
+    // wait for 10ms before switching
+    usleep (10000);
+    Arg arg2 = {.i = +1};
+    focusstack(&arg2); 
+}
+
+// Simulate mouse click
+void
+click (void)
+{
+  // Create and setting up the event
+  XEvent event;
+  memset (&event, 0, sizeof (event));
+  event.xbutton.button = Button1;
+  event.xbutton.same_screen = True;
+  event.xbutton.subwindow = root; 
+  while (event.xbutton.subwindow)
+    {
+      event.xbutton.window = event.xbutton.subwindow;
+      XQueryPointer (dpy, event.xbutton.window,
+		     &event.xbutton.root, &event.xbutton.subwindow,
+		     &event.xbutton.x_root, &event.xbutton.y_root,
+		     &event.xbutton.x, &event.xbutton.y,
+		     &event.xbutton.state);
+    }
+  // Press
+  event.type = ButtonPress;
+  if (XSendEvent (dpy, PointerWindow, True, ButtonPressMask, &event) == 0)
+    fprintf (stderr, "Error to send the event!\n");
+  XFlush (dpy);
+  usleep (1);
+  // Release
+  event.type = ButtonRelease;
+  if (XSendEvent (dpy, PointerWindow, True, ButtonReleaseMask, &event) == 0)
+    fprintf (stderr, "Error to send the event!\n");
+  XFlush (dpy);
+  usleep (1);
+}
+
 
 int
 main(int argc, char *argv[])

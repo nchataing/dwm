@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     exe.addCSourceFiles(.{ .files = &.{"drw.c", "dwm.c", "util.c"} });
 
     exe.defineCMacro("VERSION", "\"6.3\"");
+    exe.defineCMacro("XINERAMA", "1");
 
     b.installArtifact(exe);
 }

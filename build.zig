@@ -4,22 +4,31 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
-        .name = "dwm",
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = optimize
+        .optimize = optimize,
+        .link_libc = true,
     });
 
-    exe.linkLibC();
+    mod.linkSystemLibrary("x11", .{});
+    mod.linkSystemLibrary("xinerama", .{});
+    mod.linkSystemLibrary("xft", .{});
+    mod.linkSystemLibrary("fontconfig", .{});
 
-    exe.linkSystemLibrary("x11");
-    exe.linkSystemLibrary("xinerama");
-    exe.linkSystemLibrary("xft");
-    exe.linkSystemLibrary("fontconfig");
-    exe.addCSourceFiles(.{ .files = &.{"drw.c", "dwm.c", "util.c"} });
-
-    exe.defineCMacro("VERSION", "\"6.3\"");
-    exe.defineCMacro("XINERAMA", "1");
+    const exe = b.addExecutable(.{
+        .name = "dwm",
+        .root_module = mod,
+    });
 
     b.installArtifact(exe);
+
+    // Run step
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+    const run_step = b.step("run", "Run dwm");
+    run_step.dependOn(&run_cmd.step);
 }

@@ -1,2 +1,5 @@
 *.o
 dwm
+.zig-cache/
+zig-out/
+tags

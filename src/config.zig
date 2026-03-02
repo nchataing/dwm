@@ -13,7 +13,6 @@ pub const systraypinning: c_uint = 0; // 0: sloppy systray follows selected moni
 pub const systrayonleft: bool = false; // false: systray in the right corner, true: systray on left of status text
 pub const systrayspacing: c_uint = 2; // pixel gap between systray icons
 pub const systraypinningfailfirst: bool = true; // if pinning fails, fall back to the first monitor
-pub const showsystray: bool = true; // false means no systray
 
 // ── Bar ─────────────────────────────────────────────────────────────────────
 pub const showbar: bool = true; // false means no bar

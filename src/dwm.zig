@@ -677,9 +677,7 @@ pub fn cleanup() void {
     _ = c.XUngrabKey(d, x11.AnyKey, x11.AnyModifier, root);
     while (mons != null) mons.?.destroy();
 
-    if (config.showsystray) {
-        systray.cleanup();
-    }
+    systray.cleanup();
 
     for (0..CurLast) |i| {
         if (cursor[i]) |cur| {
@@ -705,14 +703,12 @@ fn clientmessage(e: *x11.XEvent) void {
     const cme = &e.xclient;
     const cl = wintoclient(cme.window);
 
-    if (config.showsystray) {
-        if (systray.ptr) |st| {
-            if (cme.window == st.win and cme.message_type == netatom[NetSystemTrayOP]) {
-                if (cme.data.l[1] == systray.SYSTEM_TRAY_REQUEST_DOCK) {
-                    systray.handleDockRequest(cme.data.l[2]);
-                }
-                return;
+    if (systray.ptr) |st| {
+        if (cme.window == st.win and cme.message_type == netatom[NetSystemTrayOP]) {
+            if (cme.data.l[1] == systray.SYSTEM_TRAY_REQUEST_DOCK) {
+                systray.handleDockRequest(cme.data.l[2]);
             }
+            return;
         }
     }
 
@@ -860,7 +856,7 @@ fn drawbar(m: *Monitor) void {
     if (!m.showbar) return;
 
     var stw: c_uint = 0;
-    if (config.showsystray and systray.systraytomon(m) == m and !config.systrayonleft)
+    if (systray.systraytomon(m) == m and !config.systrayonleft)
         stw = systray.getsystraywidth();
 
     // draw status first
@@ -2084,17 +2080,15 @@ pub fn togglebar(_: *const config.Arg) void {
     sm.showbar = !sm.showbar;
     sm.updateBarPos();
     systray.resizebarwin(sm);
-    if (config.showsystray) {
-        if (systray.ptr) |st| {
-            var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
-            if (!sm.showbar) {
-                wc.y = -bar_height;
-            } else {
-                wc.y = 0;
-                if (!sm.topbar) wc.y = sm.monitor_h - bar_height;
-            }
-            _ = c.XConfigureWindow(d, st.win, x11.CWY, &wc);
+    if (systray.ptr) |st| {
+        var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
+        if (!sm.showbar) {
+            wc.y = -bar_height;
+        } else {
+            wc.y = 0;
+            if (!sm.topbar) wc.y = sm.monitor_h - bar_height;
         }
+        _ = c.XConfigureWindow(d, st.win, x11.CWY, &wc);
     }
     arrange(sm);
 }
@@ -2189,10 +2183,10 @@ fn updatebars() void {
     while (m) |mon| : (m = mon.next) {
         if (mon.barwin != 0) continue;
         var w: c_uint = @intCast(mon.window_w);
-        if (config.showsystray and systray.systraytomon(mon) == mon) w -= systray.getsystraywidth();
+        if (systray.systraytomon(mon) == mon) w -= systray.getsystraywidth();
         mon.barwin = c.XCreateWindow(d, root, mon.window_x, mon.bar_y, w, @intCast(bar_height), 0, @intCast(c.DefaultDepth(d, screen)), x11.CopyFromParent, c.DefaultVisual(d, screen), x11.CWOverrideRedirect | x11.CWBackPixmap | x11.CWEventMask, &wa);
         if (cursor[CurNormal]) |cur| _ = c.XDefineCursor(d, mon.barwin, cur.cursor);
-        if (config.showsystray and systray.systraytomon(mon) == mon) {
+        if (systray.systraytomon(mon) == mon) {
             if (systray.ptr) |st| _ = c.XMapRaised(d, st.win);
         }
         _ = c.XMapRaised(d, mon.barwin);

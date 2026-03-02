@@ -40,7 +40,7 @@ pub var ptr: ?*Systray = null;
 /// Finds a systray icon Client by its X window ID.
 /// Returns null if the systray is disabled, the window is 0, or no match is found.
 pub fn wintosystrayicon(w: x11.Window) ?*dwm.Client {
-    if (!config.showsystray or w == 0) return null;
+    if (w == 0) return null;
     const st = ptr orelse return null;
     var i = st.icons;
     while (i) |icon| : (i = icon.next) {
@@ -77,13 +77,11 @@ pub fn systraytomon(m: ?*dwm.Monitor) ?*dwm.Monitor {
 /// Returns 1 (minimum width) if there are no icons, or the systray is disabled.
 pub fn getsystraywidth() c_uint {
     var w: c_uint = 0;
-    if (config.showsystray) {
-        if (ptr) |st| {
-            var i = st.icons;
-            while (i) |icon| : (i = icon.next) {
-                w += @intCast(icon.w);
-                w += config.systrayspacing;
-            }
+    if (ptr) |st| {
+        var i = st.icons;
+        while (i) |icon| : (i = icon.next) {
+            w += @intCast(icon.w);
+            w += config.systrayspacing;
         }
     }
     return if (w != 0) w + config.systrayspacing else 1;
@@ -92,7 +90,6 @@ pub fn getsystraywidth() c_uint {
 /// Unlinks a systray icon from the icon list and frees its memory.
 pub fn removesystrayicon(i: ?*dwm.Client) void {
     const icon = i orelse return;
-    if (!config.showsystray) return;
     const st = ptr orelse return;
     var ii: *?*dwm.Client = &st.icons;
     while (ii.* != null) {
@@ -110,7 +107,7 @@ pub fn removesystrayicon(i: ?*dwm.Client) void {
 pub fn resizebarwin(m: *dwm.Monitor) void {
     const d = dwm.dpy orelse return;
     var w: c_uint = @intCast(m.window_w);
-    if (config.showsystray and systraytomon(m) == m and !config.systrayonleft)
+    if (systraytomon(m) == m and !config.systrayonleft)
         w -= getsystraywidth();
     _ = c.XMoveResizeWindow(d, m.barwin, m.window_x, m.bar_y, w, @intCast(dwm.bar_height));
 }
@@ -142,7 +139,7 @@ pub fn updatesystrayicongeom(icon: *dwm.Client, w: c_int, h: c_int) void {
 /// the icon based on the XEMBED_MAPPED flag, and sends the appropriate
 /// XEMBED activate/deactivate message so the icon knows its visibility state.
 pub fn updatesystrayiconstate(icon: *dwm.Client, ev: *x11.XPropertyEvent) void {
-    if (!config.showsystray or ev.atom != dwm.xatom[dwm.XembedInfo]) return;
+    if (ev.atom != dwm.xatom[dwm.XembedInfo]) return;
     const flags = dwm.getatomprop(icon, dwm.xatom[dwm.XembedInfo]);
     if (flags == 0) return;
 
@@ -173,7 +170,6 @@ pub fn updatesystrayiconstate(icon: *dwm.Client, ev: *x11.XPropertyEvent) void {
 pub fn update() void {
     const d = dwm.dpy orelse return;
     const s = dwm.scheme orelse return;
-    if (!config.showsystray) return;
 
     const m = systraytomon(null) orelse return;
     var x_pos: c_int = m.monitor_x + m.monitor_w;
@@ -249,7 +245,6 @@ pub fn update() void {
 /// Called during WM shutdown.
 pub fn cleanup() void {
     const d = dwm.dpy orelse return;
-    if (!config.showsystray) return;
     if (ptr) |st| {
         _ = c.XUnmapWindow(d, st.win);
         _ = c.XDestroyWindow(d, st.win);

@@ -115,7 +115,7 @@ pub fn moveMouse(_: *const config.Arg) void {
                     toggleFloating(&config.Arg{ .i = 0 });
                 }
                 if (sm.layout.arrange == null or cl.isfloating)
-                    dwm.resize(cl, nx, ny, cl.w, cl.h, true);
+                    cl.resize(nx, ny, cl.w, cl.h, true);
             },
             x11.ButtonRelease => break,
             else => {},
@@ -169,7 +169,7 @@ pub fn resizeMouse(_: *const config.Arg) void {
                     }
                 }
                 if (sm.layout.arrange == null or cl.isfloating)
-                    dwm.resize(cl, cl.x, cl.y, nw, nh, true);
+                    cl.resize(cl.x, cl.y, nw, nh, true);
             },
             x11.ButtonRelease => break,
             else => {},
@@ -291,7 +291,7 @@ pub fn toggleFloating(_: *const config.Arg) void {
     if (sel.isfullscreen) return;
     sel.isfloating = !sel.isfloating or sel.isfixed;
     if (sel.isfloating)
-        dwm.resize(sel, sel.x, sel.y, sel.w, sel.h, false);
+        sel.resize(sel.x, sel.y, sel.w, sel.h, false);
     layout.arrange(sm);
 }
 

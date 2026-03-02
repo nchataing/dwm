@@ -2,7 +2,7 @@
 //!
 //! Defines available layout algorithms and the functions that drive window
 //! arrangement. Layouts are nearly stateless — they read Monitor geometry
-//! and the client list, then position windows via dwm.resize().
+//! and the client list, then position windows via client.resize().
 
 const std = @import("std");
 const x11 = @import("x11.zig");
@@ -68,10 +68,10 @@ pub fn tile(m: *Monitor) void {
     cl_it = nextTiled(m.clients);
     while (cl_it) |cl_c| : (cl_it = nextTiled(cl_c.next)) {
         if (i == 0) {
-            dwm.resize(cl_c, m.window_x, m.window_y, mw - (2 * cl_c.border_width), m.window_h - (2 * cl_c.border_width), false);
+            cl_c.resize(m.window_x, m.window_y, mw - (2 * cl_c.border_width), m.window_h - (2 * cl_c.border_width), false);
         } else {
             const h = @divTrunc(m.window_h - ty, @as(c_int, @intCast(n - i)));
-            dwm.resize(cl_c, m.window_x + mw, m.window_y + ty, m.window_w - mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);
+            cl_c.resize(m.window_x + mw, m.window_y + ty, m.window_w - mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);
             if (ty + cl_c.getHeight() < m.window_h) ty += cl_c.getHeight();
         }
         i += 1;
@@ -92,7 +92,7 @@ pub fn monocle(m: *Monitor) void {
     }
     var c_it = nextTiled(m.clients);
     while (c_it) |cl_c| : (c_it = nextTiled(cl_c.next)) {
-        dwm.resize(cl_c, m.window_x, m.window_y, m.window_w - 2 * cl_c.border_width, m.window_h - 2 * cl_c.border_width, false);
+        cl_c.resize(m.window_x, m.window_y, m.window_w - 2 * cl_c.border_width, m.window_h - 2 * cl_c.border_width, false);
     }
 }
 
@@ -118,7 +118,7 @@ pub fn showHide(cl: ?*Client) void {
     if (cl_c.isVisible()) {
         _ = c.XMoveWindow(d, cl_c.window, cl_c.x, cl_c.y);
         if ((cl_c.monitor != null and cl_c.monitor.?.layout.arrange == null or cl_c.isfloating) and !cl_c.isfullscreen)
-            dwm.resize(cl_c, cl_c.x, cl_c.y, cl_c.w, cl_c.h, false);
+            cl_c.resize(cl_c.x, cl_c.y, cl_c.w, cl_c.h, false);
         showHide(cl_c.snext);
     } else {
         showHide(cl_c.snext);

@@ -1,45 +1,49 @@
-// Configuration - Zig port of config.h
-// Edit this file to customize dwm.
+/// User configuration for dwm — Zig port of suckless config.h.
+/// Edit this file to customize appearance, keybindings, rules, and layouts.
+/// After changes, rebuild with `zig build` and restart dwm (Mod+Shift+E).
 const x11 = @import("x11.zig");
 const dwm = @import("dwm.zig");
 
-// Appearance
+// ── Appearance ──────────────────────────────────────────────────────────────
 pub const borderpx: c_uint = 1; // border pixel of windows
-pub const snap: c_uint = 32; // snap pixel
+pub const snap: c_uint = 32; // snap pixel: proximity threshold for edge snapping during mouse moves
 
-// Systray
+// ── Systray ─────────────────────────────────────────────────────────────────
 pub const systraypinning: c_uint = 0; // 0: sloppy systray follows selected monitor, >0: pin systray to monitor X
 pub const systrayonleft: bool = false; // false: systray in the right corner, true: systray on left of status text
-pub const systrayspacing: c_uint = 2; // systray spacing
-pub const systraypinningfailfirst: bool = true; // true: if pinning fails, display on first monitor
+pub const systrayspacing: c_uint = 2; // pixel gap between systray icons
+pub const systraypinningfailfirst: bool = true; // if pinning fails, fall back to the first monitor
 pub const showsystray: bool = true; // false means no systray
 
-// Bar
+// ── Bar ─────────────────────────────────────────────────────────────────────
 pub const showbar: bool = true; // false means no bar
 pub const topbar: bool = true; // false means bottom bar
 
-// Fonts
+// ── Fonts ───────────────────────────────────────────────────────────────────
 pub const fonts = [_][*:0]const u8{"monospace:size=10"};
 pub const dmenufont: [*:0]const u8 = "monospace:size=10";
 
-// Colors
+// ── Colors ──────────────────────────────────────────────────────────────────
 pub const col_gray1: [*:0]const u8 = "#222222";
 pub const col_gray2: [*:0]const u8 = "#444444";
 pub const col_gray3: [*:0]const u8 = "#bbbbbb";
 pub const col_gray4: [*:0]const u8 = "#eeeeee";
 pub const col_cyan: [*:0]const u8 = "#005577";
 
-// Color schemes: [fg, bg, border]
+// Color schemes: [fg, bg, border] — indexed by SchemeNorm (0) and SchemeSel (1) in dwm.zig
 pub const colors = [_][3][*:0]const u8{
-    .{ col_gray3, col_gray1, col_gray2 }, // SchemeNorm
-    .{ col_gray4, col_cyan, col_cyan }, // SchemeSel
+    .{ col_gray3, col_gray1, col_gray2 }, // SchemeNorm: unfocused windows / default bar
+    .{ col_gray4, col_cyan, col_cyan }, // SchemeSel:  focused window / selected tag
 };
 
-// Tagging
+// ── Tagging ─────────────────────────────────────────────────────────────────
+// Tags are displayed in the bar; each window can belong to one or more tags (bitmask).
 pub const tags = [_][*:0]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 pub const TAGMASK = (1 << tags.len) - 1;
 
-// Rules
+// ── Rules ───────────────────────────────────────────────────────────────────
+// Rules match newly-mapped windows by class/instance/title and override their default
+// tag assignment, floating state, and target monitor. -1 for monitor means "current".
 pub const Rule = struct {
     class: ?[*:0]const u8,
     instance: ?[*:0]const u8,
@@ -54,12 +58,14 @@ pub const rules = [_]Rule{
     .{ .class = "Firefox", .instance = null, .title = null, .tags = 1 << 8, .isfloating = false, .monitor = -1 },
 };
 
-// Layout
-pub const mfact: f32 = 0.6; // factor of master area size [0.05..0.95]
-pub const nmaster: c_int = 1; // number of clients in master area
-pub const resizehints: bool = false; // true means respect size hints in tiled resizals
+// ── Layout ──────────────────────────────────────────────────────────────────
+pub const master_factor: f32 = 0.6; // fraction of screen width given to master area [0.05..0.95]
+pub const num_masters: c_int = 1; // number of clients in master area
+pub const resizehints: bool = false; // true means respect size hints in tiled resizals (can cause gaps)
 pub const lockfullscreen: bool = true; // true will force focus on the fullscreen window
 
+// Available layout algorithms. The first entry is the default.
+// symbol is shown in the bar; arrange=null means floating (no automatic positioning).
 pub const Layout = struct {
     symbol: [*:0]const u8,
     arrange: ?*const fn (*dwm.Monitor) void,
@@ -71,9 +77,11 @@ pub const layouts = [_]Layout{
     .{ .symbol = "[M]", .arrange = &dwm.monocle },
 };
 
-// Key definitions
+// ── Key definitions ─────────────────────────────────────────────────────────
+// MODKEY is the modifier key used for all dwm keybindings (Mod4 = Super/Win key).
 pub const MODKEY = x11.Mod4Mask;
 
+/// Tagged union for passing different argument types to keybinding/button callbacks.
 pub const Arg = union {
     i: c_int,
     ui: c_uint,
@@ -96,7 +104,9 @@ pub const Button = struct {
     arg: Arg,
 };
 
-// Commands
+// ── Commands ────────────────────────────────────────────────────────────────
+// Null-terminated argv arrays passed to spawn(). The dmenu command receives
+// monitor number and color scheme args so it matches dwm's appearance.
 pub const dmenucmd = [_:null]?[*:0]const u8{
     "dmenu_run",
     "-m",
@@ -115,6 +125,11 @@ pub const dmenucmd = [_:null]?[*:0]const u8{
 pub const termcmd = [_:null]?[*:0]const u8{ "kitty", null };
 pub const screenswitchcmd = [_:null]?[*:0]const u8{ "/home/nchataing/perso/utils/screen.sh", null };
 
+/// Generate the four standard per-tag keybindings for a given key:
+///   Mod+key       → view tag          (switch to that tag)
+///   Mod+Ctrl+key  → toggleview tag    (add/remove tag from view)
+///   Mod+Shift+key → tag client        (move focused client to that tag)
+///   Mod+Ctrl+Shift+key → toggletag    (toggle that tag on focused client)
 fn tagkeys(comptime key: x11.KeySym, comptime tag: u5) [4]Key {
     return .{
         .{ .mod = MODKEY, .keysym = key, .func = &dwm.view, .arg = .{ .ui = 1 << tag } },
@@ -124,6 +139,8 @@ fn tagkeys(comptime key: x11.KeySym, comptime tag: u5) [4]Key {
     };
 }
 
+// Keybindings. Keys are for a BEPO keyboard layout — the number row produces
+// «»()@+−/ rather than 1-9, so tagkeys use those keysyms instead of XK_1..XK_9.
 pub const keys = [_]Key{
     .{ .mod = MODKEY, .keysym = x11.XK_p, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&dmenucmd) } },
     .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_Return, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
@@ -154,7 +171,9 @@ pub const keys = [_]Key{
     .{ .mod = MODKEY, .keysym = x11.XK_F1, .func = &dwm.f1switchfocus, .arg = .{ .i = 0 } },
 };
 
-// Click areas
+// ── Click areas ─────────────────────────────────────────────────────────────
+// Identifiers for regions of the bar/screen that can receive mouse clicks.
+// Used by the button bindings below to distinguish where a click occurred.
 pub const ClkTagBar = 0;
 pub const ClkLtSymbol = 1;
 pub const ClkStatusText = 2;
@@ -163,6 +182,7 @@ pub const ClkClientWin = 4;
 pub const ClkRootWin = 5;
 pub const ClkLast = 6;
 
+// Mouse button bindings: associate clicks in specific areas with actions.
 pub const buttons = [_]Button{
     .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button1, .func = &dwm.tag, .arg = .{ .i = 0 } },
     .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button3, .func = &dwm.toggletag, .arg = .{ .i = 0 } },

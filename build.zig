@@ -1,5 +1,8 @@
 const std = @import("std");
 
+/// Build configuration for dwm.
+/// Links against system X11 libraries; they must be installed as dev packages
+/// (e.g. libx11-dev, libxinerama-dev, libxft-dev, libfontconfig-dev on Debian).
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -8,13 +11,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = true, // needed for Xlib (C ABI) and libc calls (setlocale, fork, exec)
     });
 
-    mod.linkSystemLibrary("x11", .{});
-    mod.linkSystemLibrary("xinerama", .{});
-    mod.linkSystemLibrary("xft", .{});
-    mod.linkSystemLibrary("fontconfig", .{});
+    mod.linkSystemLibrary("x11", .{}); // core Xlib — display, windows, events, atoms
+    mod.linkSystemLibrary("xinerama", .{}); // multi-monitor geometry queries
+    mod.linkSystemLibrary("xft", .{}); // Xft font rendering (anti-aliased, Unicode-aware)
+    mod.linkSystemLibrary("fontconfig", .{}); // font matching and fallback discovery
 
     const exe = b.addExecutable(.{
         .name = "dwm",

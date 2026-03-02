@@ -17,6 +17,7 @@ const bar = @import("bar.zig");
 const client = @import("client.zig");
 const focus_mod = @import("focus.zig");
 const dwm = @import("dwm.zig");
+const colors = @import("colors.zig");
 const status = @import("status.zig");
 const c = x11.c;
 
@@ -64,13 +65,13 @@ pub const dmenucmd = [_:null]?[*:0]const u8{
     "-fn",
     dwm.dmenufont,
     "-nb",
-    dwm.col_gray1,
+    colors.gray1,
     "-nf",
-    dwm.col_gray3,
+    colors.gray3,
     "-sb",
-    dwm.col_cyan,
+    colors.cyan,
     "-sf",
-    dwm.col_gray4,
+    colors.gray4,
 };
 pub const termcmd = [_:null]?[*:0]const u8{ "kitty", null };
 pub const screenswitchcmd = [_:null]?[*:0]const u8{ "/home/nchataing/perso/utils/screen.sh", null };
@@ -283,7 +284,7 @@ fn buttonpress(e: *x11.XEvent) void {
             arg = .{ .ui = @intCast(i) };
         } else if (ev.x < x + bar.layout_label_width) {
             click = ClkLtSymbol;
-        } else if (ev.x > sm.window_w - bar.textWidth(&bar.status_text) - @as(c_int, @intCast(systray.getsystraywidth()))) {
+        } else if (ev.x > sm.window_w - bar.statusWidth() - @as(c_int, @intCast(systray.getsystraywidth()))) {
             click = ClkStatusText;
         } else {
             click = ClkWinTitle;

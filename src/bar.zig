@@ -19,7 +19,6 @@ pub const tags = [_][*:0]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" }
 
 // ── Bar state ───────────────────────────────────────────────────────────────
 
-pub var status_text: [256:0]u8 = [_:0]u8{0} ** 256; // status text, populated by the embedded status module
 pub var bar_height: c_int = 0; // height of the status bar (font height + 2)
 pub var text_lr_pad: c_int = 0; // left+right padding for text drawn in the bar
 pub var layout_label_width: c_int = 0; // width of the layout symbol text in the bar
@@ -34,6 +33,17 @@ pub fn textWidth(x: [*:0]const u8) c_int {
     return 0;
 }
 
+/// Total pixel width of the status area (all blocks + inter-block gaps).
+pub fn statusWidth() c_int {
+    var tw: c_int = 0;
+    for (0..status.block_count) |i| {
+        tw += textWidth(&status.blocks[i].text);
+    }
+    if (status.block_count > 1)
+        tw += @as(c_int, @intCast(status.block_count - 1)) * 2;
+    return tw;
+}
+
 /// Renders the entire status bar for one monitor: tag labels, layout symbol,
 /// focused window title, and status text. Accounts for systray width when the
 /// tray is on this monitor.
@@ -46,12 +56,18 @@ pub fn drawbar(m: *Monitor) void {
     if (systray.systraytomon(m) == m and !systray.systrayonleft)
         stw = systray.getsystraywidth();
 
-    // draw status first
+    // draw status blocks (right-aligned, each with its own color scheme)
     var tw: c_int = 0;
     if (dwm.selmon == m) {
-        d.setScheme(s[dwm.SchemeNorm]);
-        tw = textWidth(&status_text) - @divTrunc(text_lr_pad, 2) + 2;
-        _ = d.text(m.window_w - tw - @as(c_int, @intCast(stw)), 0, @intCast(tw), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2) - 2), &status_text, false);
+        tw = statusWidth();
+        // draw blocks left-to-right starting from the right edge
+        var sx = m.window_w - tw - @as(c_int, @intCast(stw));
+        for (0..status.block_count) |i| {
+            const bw = textWidth(&status.blocks[i].text);
+            d.setScheme(status.blocks[i].scheme());
+            _ = d.text(sx, 0, @intCast(bw), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), &status.blocks[i].text, false);
+            sx += bw + 2; // 2px gap between blocks
+        }
     }
 
     systray.resizebarwin(m);

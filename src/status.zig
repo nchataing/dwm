@@ -1,16 +1,57 @@
 //! Embedded status bar — reads system info (battery, time) and renders it
-//! directly into the bar's status text buffer. Replaces the external
+//! as individually colored blocks in the bar. Replaces the external
 //! xsetroot/slstatus workflow with an internal timer-driven update.
+//!
+//! Each block carries its own text + fg/bg XftColors, allowing segments to
+//! pick colors dynamically at runtime (e.g. red battery when capacity < 10%).
 //!
 //! Uses a Linux timerfd to fire periodic updates, which integrates cleanly
 //! with the poll()-based event loop in events.zig.
 
 const std = @import("std");
-const bar = @import("bar.zig");
+const drw = @import("drw.zig");
+const colors = @import("colors.zig");
 
 const c = @cImport({
     @cInclude("time.h");
 });
+
+// ── Block ───────────────────────────────────────────────────────────────────
+
+/// A single status segment with its own text and color pair.
+pub const Block = struct {
+    text: [64:0]u8 = [_:0]u8{0} ** 64,
+    /// Color pair: [0] = fg (ColFg), [1] = bg (ColBg).
+    /// Stored as a 2-element array so we can pass it directly to drw.setScheme().
+    colors: [2]drw.Color = undefined,
+
+    pub fn scheme(self: *Block) [*]drw.Color {
+        return &self.colors;
+    }
+};
+
+pub var blocks: [segments.len]Block = [_]Block{.{}} ** segments.len;
+pub var block_count: usize = 0;
+
+// ── Pre-allocated XftColors ─────────────────────────────────────────────────
+
+var col_bat_normal: drw.Color = undefined;
+var col_bat_warning: drw.Color = undefined;
+var col_bat_critical: drw.Color = undefined;
+var col_bat_charging: drw.Color = undefined;
+var col_time_fg: drw.Color = undefined;
+var col_status_bg: drw.Color = undefined;
+
+/// Allocate all status XftColors from the draw context. Must be called once
+/// during setup(), after the DrawContext is created.
+pub fn initColors(d: *drw.DrawContext) void {
+    d.colorCreate(&col_bat_normal, colors.bat_normal);
+    d.colorCreate(&col_bat_warning, colors.bat_warning);
+    d.colorCreate(&col_bat_critical, colors.bat_critical);
+    d.colorCreate(&col_bat_charging, colors.bat_charging);
+    d.colorCreate(&col_time_fg, colors.time_fg);
+    d.colorCreate(&col_status_bg, colors.status_bg);
+}
 
 // ── Battery icon mapping ────────────────────────────────────────────────────
 
@@ -38,56 +79,68 @@ fn readSysFile(buf: []u8, comptime path: [*:0]const u8) []const u8 {
 
 // ── Status segments ─────────────────────────────────────────────────────────
 
-const StatusFn = *const fn ([]u8) ?[]const u8;
+const SegmentFn = *const fn (*Block) bool;
 
-fn getBattery(buf: []u8) ?[]const u8 {
+fn getBattery(block: *Block) bool {
     var status_buf: [64]u8 = undefined;
     var cap_buf: [16]u8 = undefined;
     const status = readSysFile(&status_buf, "/sys/class/power_supply/BAT0/status");
     const icon = bat_icon_map.get(status) orelse "?";
     const capacity = readSysFile(&cap_buf, "/sys/class/power_supply/BAT0/capacity");
-    return std.fmt.bufPrint(buf, "{s} {s}%", .{ icon, capacity }) catch null;
+
+    // Format text
+    const text = std.fmt.bufPrint(&block.text, "{s} {s}%", .{ icon, capacity }) catch return false;
+    block.text[text.len] = 0;
+
+    // Pick fg color based on charging status and capacity
+    block.colors[1] = col_status_bg;
+    if (std.mem.eql(u8, status, "Charging") or std.mem.eql(u8, status, "Full") or std.mem.eql(u8, status, "Not charging")) {
+        block.colors[0] = col_bat_charging;
+    } else {
+        // Discharging — color by capacity level
+        const cap = std.fmt.parseInt(u8, capacity, 10) catch 50;
+        if (cap < 10) {
+            block.colors[0] = col_bat_critical;
+        } else if (cap < 30) {
+            block.colors[0] = col_bat_warning;
+        } else {
+            block.colors[0] = col_bat_normal;
+        }
+    }
+    return true;
 }
 
-fn getTime(buf: []u8) ?[]const u8 {
+fn getTime(block: *Block) bool {
     var now: c.time_t = undefined;
     _ = c.time(&now);
-    const tm = c.localtime(&now) orelse return null;
-    return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}", .{
+    const tm = c.localtime(&now) orelse return false;
+    const text = std.fmt.bufPrint(&block.text, "{d:0>2}:{d:0>2}", .{
         @as(u64, @intCast(tm.*.tm_hour)),
         @as(u64, @intCast(tm.*.tm_min)),
-    }) catch null;
+    }) catch return false;
+    block.text[text.len] = 0;
+
+    block.colors[0] = col_time_fg;
+    block.colors[1] = col_status_bg;
+    return true;
 }
 
-const segments: []const StatusFn = &.{
+const segments: []const SegmentFn = &.{
     &getBattery,
     &getTime,
 };
 
 // ── Status builder ──────────────────────────────────────────────────────────
 
-/// Calls each segment function and joins non-null results with " | ".
-/// Writes the result (null-terminated) directly into `bar.status_text`.
+/// Calls each segment function and populates the blocks array.
 pub fn update() void {
-    var pos: usize = 0;
-    var first = true;
-    const buf = &bar.status_text;
-
+    var count: usize = 0;
     for (segments) |seg| {
-        var seg_buf: [64]u8 = undefined;
-        const text = seg(&seg_buf) orelse continue;
-        if (!first) {
-            if (pos + 3 > buf.len) return;
-            @memcpy(buf[pos..][0..3], " | ");
-            pos += 3;
+        if (seg(&blocks[count])) {
+            count += 1;
         }
-        if (pos + text.len > buf.len - 1) return;
-        @memcpy(buf[pos..][0..text.len], text);
-        pos += text.len;
-        first = false;
     }
-
-    buf[pos] = 0;
+    block_count = count;
 }
 
 // ── Timer integration ───────────────────────────────────────────────────────

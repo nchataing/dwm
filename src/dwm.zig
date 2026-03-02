@@ -19,6 +19,8 @@ const actions = @import("actions.zig");
 const client = @import("client.zig");
 const focus_mod = @import("focus.zig");
 const events = @import("events.zig");
+const colors = @import("colors.zig");
+const status = @import("status.zig");
 const c = x11.c;
 
 pub const VERSION = "6.3";
@@ -96,15 +98,6 @@ const alloc = std.heap.c_allocator;
 // ── Appearance config ───────────────────────────────────────────────────────
 pub const fonts = [_][*:0]const u8{"monospace:size=10"};
 pub const dmenufont: [*:0]const u8 = "monospace:size=10";
-pub const col_gray1: [*:0]const u8 = "#222222";
-pub const col_gray2: [*:0]const u8 = "#444444";
-pub const col_gray3: [*:0]const u8 = "#bbbbbb";
-pub const col_gray4: [*:0]const u8 = "#eeeeee";
-pub const col_cyan: [*:0]const u8 = "#005577";
-pub const colors = [_][3][*:0]const u8{
-    .{ col_gray3, col_gray1, col_gray2 },
-    .{ col_gray4, col_cyan, col_cyan },
-};
 
 // --- Helper functions ---
 // These replace the C preprocessor macros from the original dwm.c.
@@ -452,12 +445,15 @@ pub fn setup() void {
     cursor[CurMove] = dr.curCreate(x11.XC_fleur) catch null;
 
     // init appearance
-    scheme = alloc.alloc([*]drw.Color, colors.len) catch null;
+    scheme = alloc.alloc([*]drw.Color, colors.schemes.len) catch null;
     if (scheme) |s| {
-        for (0..colors.len) |i| {
-            s[i] = dr.schemeCreate(&colors[i]) orelse continue;
+        for (0..colors.schemes.len) |i| {
+            s[i] = dr.schemeCreate(&colors.schemes[i]) orelse continue;
         }
     }
+
+    // init status bar colors
+    status.initColors(dr);
 
     // init system tray
     systray.update();

@@ -248,7 +248,7 @@ pub fn update() void {
 
     const m = systraytomon(null) orelse return;
     var x_pos: c_int = m.monitor_x + m.monitor_w;
-    const status_w = bar.textWidth(&bar.status_text) - bar.text_lr_pad + @as(c_int, @intCast(systrayspacing));
+    const status_w = bar.statusWidth() - bar.text_lr_pad + @as(c_int, @intCast(systrayspacing));
     var w: c_uint = 1;
 
     if (systrayonleft) x_pos -= status_w + @divTrunc(bar.text_lr_pad, 2);

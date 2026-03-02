@@ -17,7 +17,6 @@ const alloc = std.heap.c_allocator;
 pub const Monitor = struct {
     layout_symbol: [16:0]u8 = [_:0]u8{0} ** 16, // text shown in the bar for current layout (e.g. "[]=")
     master_factor: f32 = 0, // fraction of screen width given to master area [0.05..0.95]
-    num_masters: c_int = 0, // number of windows in the master area
     num: c_int = 0, // monitor index (0-based, matches Xinerama order)
     bar_y: c_int = 0, // y position of the bar window
 
@@ -51,7 +50,6 @@ pub const Monitor = struct {
         const m = alloc.create(Monitor) catch return null;
         m.* = Monitor{};
         m.master_factor = config.master_factor;
-        m.num_masters = config.num_masters;
         m.showbar = config.showbar;
         m.topbar = config.topbar;
         m.lt[0] = &config.layouts[0];

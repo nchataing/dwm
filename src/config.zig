@@ -58,7 +58,6 @@ pub const rules = [_]Rule{
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 pub const master_factor: f32 = 0.6; // fraction of screen width given to master area [0.05..0.95]
-pub const num_masters: c_int = 1; // number of clients in master area
 pub const resizehints: bool = false; // true means respect size hints in tiled resizals (can cause gaps)
 pub const lockfullscreen: bool = true; // true will force focus on the fullscreen window
 
@@ -143,8 +142,6 @@ pub const keys = [_]Key{
     .{ .mod = MODKEY, .keysym = x11.XK_j, .func = &dwm.focusstack, .arg = .{ .i = 1 } },
     .{ .mod = MODKEY, .keysym = x11.XK_k, .func = &dwm.focusstack, .arg = .{ .i = -1 } },
     .{ .mod = MODKEY, .keysym = x11.XK_Tab, .func = &dwm.focusstack, .arg = .{ .i = 1 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_i, .func = &dwm.incnmaster, .arg = .{ .i = 1 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_d, .func = &dwm.incnmaster, .arg = .{ .i = -1 } },
     .{ .mod = MODKEY, .keysym = x11.XK_h, .func = &dwm.setmfact, .arg = .{ .f = -0.05 } },
     .{ .mod = MODKEY, .keysym = x11.XK_l, .func = &dwm.setmfact, .arg = .{ .f = 0.05 } },
     .{ .mod = MODKEY, .keysym = x11.XK_Return, .func = &dwm.zoom, .arg = .{ .i = 0 } },

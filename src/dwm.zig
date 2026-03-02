@@ -1062,15 +1062,6 @@ fn grabkeys() void {
     }
 }
 
-/// Keybinding action: adjusts the number of windows in the master area.
-/// More masters means the layout splits the master column among more windows;
-/// fewer means the stack area gets more. Clamped to >= 0.
-pub fn incnmaster(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    sm.num_masters = @max(sm.num_masters + arg.i, 0);
-    arrange(sm);
-}
-
 /// X11 KeyPress event handler. Translates the hardware keycode to a keysym,
 /// then searches config.keys for a matching keysym+modifier combo and calls
 /// the associated action function.
@@ -1890,31 +1881,26 @@ pub fn tagmon(arg: *const config.Arg) void {
 
 /// Master-stack tiling layout (the default "[]=" layout). Splits the monitor
 /// into a left master area and right stack area based on master_factor. The
-/// first num_masters clients fill the master area (split vertically); the
-/// rest fill the stack area (also split vertically). This is dwm's signature
-/// layout — efficient for coding with one main editor and several terminals.
+/// first client fills the master area; the rest fill the stack area (split
+/// vertically). This is dwm's signature layout — efficient for coding with
+/// one main editor and several terminals.
 pub fn tile(m: *Monitor) void {
     var n: c_uint = 0;
     var cl_it = nexttiled(m.clients);
     while (cl_it) |cl_c| : (cl_it = nexttiled(cl_c.next)) n += 1;
     if (n == 0) return;
 
-    var mw: c_int = undefined;
-    if (n > @as(c_uint, @intCast(m.num_masters))) {
-        mw = if (m.num_masters != 0) @intFromFloat(@as(f32, @floatFromInt(m.window_w)) * m.master_factor) else 0;
-    } else {
-        mw = m.window_w;
-    }
+    const mw: c_int = if (n > 1)
+        @intFromFloat(@as(f32, @floatFromInt(m.window_w)) * m.master_factor)
+    else
+        m.window_w;
 
     var i: c_uint = 0;
-    var my: c_int = 0;
     var ty: c_int = 0;
     cl_it = nexttiled(m.clients);
     while (cl_it) |cl_c| : (cl_it = nexttiled(cl_c.next)) {
-        if (i < @as(c_uint, @intCast(m.num_masters))) {
-            const h = @divTrunc(m.window_h - my, @as(c_int, @intCast(@min(n, @as(c_uint, @intCast(m.num_masters))) - i)));
-            resize(cl_c, m.window_x, m.window_y + my, mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);
-            if (my + cl_c.getHeight() < m.window_h) my += cl_c.getHeight();
+        if (i == 0) {
+            resize(cl_c, m.window_x, m.window_y, mw - (2 * cl_c.border_width), m.window_h - (2 * cl_c.border_width), false);
         } else {
             const h = @divTrunc(m.window_h - ty, @as(c_int, @intCast(n - i)));
             resize(cl_c, m.window_x + mw, m.window_y + ty, m.window_w - mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);

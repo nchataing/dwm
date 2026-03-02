@@ -37,9 +37,8 @@ pub const colors = [_][3][*:0]const u8{
 };
 
 // ── Tagging ─────────────────────────────────────────────────────────────────
-// Tags are displayed in the bar; each window can belong to one or more tags (bitmask).
+// Tags are displayed in the bar; each window belongs to exactly one tag (index 0..8).
 pub const tags = [_][*:0]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" };
-pub const TAGMASK = (1 << tags.len) - 1;
 
 // ── Rules ───────────────────────────────────────────────────────────────────
 // Rules match newly-mapped windows by class/instance/title and override their default
@@ -48,14 +47,14 @@ pub const Rule = struct {
     class: ?[*:0]const u8,
     instance: ?[*:0]const u8,
     title: ?[*:0]const u8,
-    tags: c_uint,
+    tag: ?u5, // null = inherit monitor's current tag
     isfloating: bool,
     monitor: i32,
 };
 
 pub const rules = [_]Rule{
-    .{ .class = "Gimp", .instance = null, .title = null, .tags = 0, .isfloating = true, .monitor = -1 },
-    .{ .class = "Firefox", .instance = null, .title = null, .tags = 1 << 8, .isfloating = false, .monitor = -1 },
+    .{ .class = "Gimp", .instance = null, .title = null, .tag = null, .isfloating = true, .monitor = -1 },
+    .{ .class = "Firefox", .instance = null, .title = null, .tag = 8, .isfloating = false, .monitor = -1 },
 };
 
 // ── Layout ──────────────────────────────────────────────────────────────────
@@ -125,17 +124,13 @@ pub const dmenucmd = [_:null]?[*:0]const u8{
 pub const termcmd = [_:null]?[*:0]const u8{ "kitty", null };
 pub const screenswitchcmd = [_:null]?[*:0]const u8{ "/home/nchataing/perso/utils/screen.sh", null };
 
-/// Generate the four standard per-tag keybindings for a given key:
+/// Generate the two standard per-tag keybindings for a given key:
 ///   Mod+key       → view tag          (switch to that tag)
-///   Mod+Ctrl+key  → toggleview tag    (add/remove tag from view)
 ///   Mod+Shift+key → tag client        (move focused client to that tag)
-///   Mod+Ctrl+Shift+key → toggletag    (toggle that tag on focused client)
-fn tagkeys(comptime key: x11.KeySym, comptime tag: u5) [4]Key {
+fn tagkeys(comptime key: x11.KeySym, comptime tag_idx: u5) [2]Key {
     return .{
-        .{ .mod = MODKEY, .keysym = key, .func = &dwm.view, .arg = .{ .ui = 1 << tag } },
-        .{ .mod = MODKEY | x11.ControlMask, .keysym = key, .func = &dwm.toggleview, .arg = .{ .ui = 1 << tag } },
-        .{ .mod = MODKEY | x11.ShiftMask, .keysym = key, .func = &dwm.tag, .arg = .{ .ui = 1 << tag } },
-        .{ .mod = MODKEY | x11.ControlMask | x11.ShiftMask, .keysym = key, .func = &dwm.toggletag, .arg = .{ .ui = 1 << tag } },
+        .{ .mod = MODKEY, .keysym = key, .func = &dwm.view, .arg = .{ .ui = tag_idx } },
+        .{ .mod = MODKEY | x11.ShiftMask, .keysym = key, .func = &dwm.tag, .arg = .{ .ui = tag_idx } },
     };
 }
 
@@ -160,8 +155,6 @@ pub const keys = [_]Key{
     .{ .mod = MODKEY, .keysym = x11.XK_m, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layouts[2]) } },
     .{ .mod = MODKEY, .keysym = x11.XK_space, .func = &dwm.setlayout, .arg = .{ .v = null } },
     .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_space, .func = &dwm.togglefloating, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_asterisk, .func = &dwm.view, .arg = .{ .ui = @as(c_uint, @bitCast(@as(c_int, -1))) } },
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_asterisk, .func = &dwm.tag, .arg = .{ .ui = @as(c_uint, @bitCast(@as(c_int, -1))) } },
     .{ .mod = MODKEY, .keysym = x11.XK_comma, .func = &dwm.focusmon, .arg = .{ .i = -1 } },
     .{ .mod = MODKEY, .keysym = x11.XK_period, .func = &dwm.focusmon, .arg = .{ .i = 1 } },
     .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_comma, .func = &dwm.tagmon, .arg = .{ .i = -1 } },
@@ -185,12 +178,10 @@ pub const ClkLast = 6;
 // Mouse button bindings: associate clicks in specific areas with actions.
 pub const buttons = [_]Button{
     .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button1, .func = &dwm.tag, .arg = .{ .i = 0 } },
-    .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button3, .func = &dwm.toggletag, .arg = .{ .i = 0 } },
     .{ .click = ClkWinTitle, .mask = 0, .button = x11.Button2, .func = &dwm.zoom, .arg = .{ .i = 0 } },
     .{ .click = ClkStatusText, .mask = 0, .button = x11.Button2, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
     .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button1, .func = &dwm.movemouse, .arg = .{ .i = 0 } },
     .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button2, .func = &dwm.togglefloating, .arg = .{ .i = 0 } },
     .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button3, .func = &dwm.resizemouse, .arg = .{ .i = 0 } },
     .{ .click = ClkTagBar, .mask = 0, .button = x11.Button1, .func = &dwm.view, .arg = .{ .i = 0 } },
-    .{ .click = ClkTagBar, .mask = 0, .button = x11.Button3, .func = &dwm.toggleview, .arg = .{ .i = 0 } },
 };

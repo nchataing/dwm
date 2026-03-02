@@ -147,13 +147,13 @@ pub fn updatesystrayiconstate(icon: *dwm.Client, ev: *x11.XPropertyEvent) void {
     if (flags == 0) return;
 
     var code: c_long = 0;
-    if (flags & XEMBED_MAPPED != 0 and icon.tags == 0) {
-        icon.tags = 1;
+    if (flags & XEMBED_MAPPED != 0 and icon.embed_state == .inactive) {
+        icon.embed_state = .active;
         code = XEMBED_WINDOW_ACTIVATE;
         _ = c.XMapRaised(dwm.dpy.?, icon.window);
         icon.setClientState(x11.NormalState);
-    } else if (flags & XEMBED_MAPPED == 0 and icon.tags != 0) {
-        icon.tags = 0;
+    } else if (flags & XEMBED_MAPPED == 0 and icon.embed_state == .active) {
+        icon.embed_state = .inactive;
         code = XEMBED_WINDOW_DEACTIVATE;
         _ = c.XUnmapWindow(dwm.dpy.?, icon.window);
         icon.setClientState(x11.WithdrawnState);
@@ -296,7 +296,7 @@ pub fn handleDockRequest(cme_window: c_long) void {
     icon.old_border_width = wa.border_width;
     icon.border_width = 0;
     icon.isfloating = true;
-    icon.tags = 1;
+    icon.embed_state = .active;
     icon.updateSizeHints();
     updatesystrayicongeom(icon, wa.width, wa.height);
     _ = c.XAddToSaveSet(d, icon.window);

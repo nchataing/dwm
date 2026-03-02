@@ -56,6 +56,10 @@ const WMState = 2; // WM_STATE — track normal/iconic/withdrawn state
 const WMTakeFocus = 3; // WM_TAKE_FOCUS — give keyboard focus to a client
 const WMLast = 4;
 
+// XEMBED visibility state for system tray icons.
+// Replaces the old hack of (ab)using Client.tag as a boolean (0=hidden, 1=visible).
+pub const EmbedState = enum { inactive, active };
+
 // A Client represents a single managed window (X11 toplevel).
 // Also reused for system tray icons (which are embedded windows).
 pub const Client = struct {
@@ -89,13 +93,14 @@ pub const Client = struct {
     border_width: c_int = 0, // current border thickness
     old_border_width: c_int = 0, // saved before fullscreen (which sets border to 0)
 
-    tags: c_uint = 0, // bitmask of tags this client is shown on
+    tag: u5 = 0, // tag index this client is shown on (0..8)
     isfixed: bool = false, // true if min==max size (cannot be resized)
     isfloating: bool = false, // true if exempt from tiling layout
     isurgent: bool = false, // true if demands attention (flashing tag)
     neverfocus: bool = false, // true if client told us not to give it input focus
     was_floating: bool = false, // floating state before entering fullscreen
     isfullscreen: bool = false,
+    embed_state: EmbedState = .inactive, // XEMBED mapped state (only used for systray icons)
 
     next: ?*Client = null, // next in the per-monitor client list (creation order)
     snext: ?*Client = null, // next in the per-monitor focus stack (most-recently-focused order)
@@ -104,10 +109,10 @@ pub const Client = struct {
 
     // --- Methods ---
 
-    /// A client is visible if any of its tags overlap with the monitor's active tagset.
+    /// A client is visible if its tag matches the monitor's active tag.
     pub fn isVisible(self: *Client) bool {
         const m = self.monitor orelse return false;
-        return (self.tags & m.tagset[m.selected_tags]) != 0;
+        return self.tag == m.tag;
     }
 
     /// Total width of a client window including its borders on both sides.
@@ -354,10 +359,8 @@ pub const Monitor = struct {
     window_w: c_int = 0,
     window_h: c_int = 0,
 
-    // Tag state — we keep two slots so `view` can toggle between current and previous
-    selected_tags: c_uint = 0, // index (0 or 1) into tagset[] for the active tag set
+    tag: u5 = 0, // index of the currently viewed tag (0..8)
     selected_layout: c_uint = 0, // index (0 or 1) into lt[] for the active layout
-    tagset: [2]c_uint = .{ 1, 1 }, // two remembered tag bitmasks
     showbar: bool = true,
     topbar: bool = true,
 
@@ -373,7 +376,6 @@ pub const Monitor = struct {
     pub fn create() ?*Monitor {
         const m = alloc.create(Monitor) catch return null;
         m.* = Monitor{};
-        m.tagset = .{ 1, 1 };
         m.master_factor = config.master_factor;
         m.num_masters = config.num_masters;
         m.showbar = config.showbar;
@@ -525,7 +527,7 @@ fn init_handler() [x11.LASTEvent]?HandlerFn {
 fn applyrules(cl: *Client) void {
     const d = dpy orelse return;
     cl.isfloating = false;
-    cl.tags = 0;
+    var rule_tag: ?u5 = null;
 
     var ch: x11.XClassHint = .{ .res_name = null, .res_class = null };
     _ = c.XGetClassHint(d, cl.window, &ch);
@@ -538,7 +540,7 @@ fn applyrules(cl: *Client) void {
             if (r.class == null or cstrstr(class_str, r.class.?)) {
                 if (r.instance == null or cstrstr(instance_str, r.instance.?)) {
                     cl.isfloating = r.isfloating;
-                    cl.tags |= r.tags;
+                    if (r.tag) |t| rule_tag = t;
                     var m = mons;
                     while (m) |mon| : (m = mon.next) {
                         if (mon.num == r.monitor) {
@@ -555,7 +557,7 @@ fn applyrules(cl: *Client) void {
     if (ch.res_name) |name| _ = c.XFree(name);
 
     const m = cl.monitor orelse return;
-    cl.tags = if (cl.tags & config.TAGMASK != 0) cl.tags & config.TAGMASK else m.tagset[m.selected_tags];
+    cl.tag = rule_tag orelse m.tag;
 }
 
 /// Substring search for C-style null-terminated strings.
@@ -619,7 +621,7 @@ fn buttonpress(e: *x11.XEvent) void {
         }
         if (i < config.tags.len and ev.x < x) {
             click = config.ClkTagBar;
-            arg = .{ .ui = @as(c_uint, 1) << @intCast(i) };
+            arg = .{ .ui = @intCast(i) };
         } else if (ev.x < x + layout_label_width) {
             click = config.ClkLtSymbol;
         } else if (ev.x > sm.window_w - TEXTW(&status_text) - @as(c_int, @intCast(systray.getsystraywidth()))) {
@@ -871,12 +873,12 @@ fn drawbar(m: *Monitor) void {
 
     systray.resizebarwin(m);
 
-    var occ: c_uint = 0;
-    var urg: c_uint = 0;
+    var occ = [_]bool{false} ** config.tags.len; // which tags have clients
+    var urg = [_]bool{false} ** config.tags.len; // which tags have urgent clients
     var cl_it = m.clients;
     while (cl_it) |cl_c| : (cl_it = cl_c.next) {
-        occ |= cl_c.tags;
-        if (cl_c.isurgent) urg |= cl_c.tags;
+        occ[cl_c.tag] = true;
+        if (cl_c.isurgent) urg[cl_c.tag] = true;
     }
 
     var x: c_int = 0;
@@ -885,10 +887,10 @@ fn drawbar(m: *Monitor) void {
 
     for (0..config.tags.len) |i| {
         const w = TEXTW(config.tags[i]);
-        d.setScheme(if (m.tagset[m.selected_tags] & (@as(c_uint, 1) << @intCast(i)) != 0) s[SchemeSel] else s[SchemeNorm]);
-        _ = d.text(x, 0, @intCast(w), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), config.tags[i], urg & (@as(c_uint, 1) << @intCast(i)) != 0);
-        if (occ & (@as(c_uint, 1) << @intCast(i)) != 0) {
-            d.rect(x + boxs, boxs, @intCast(boxw), @intCast(boxw), m == selmon and m.sel != null and (m.sel.?.tags & (@as(c_uint, 1) << @intCast(i))) != 0, urg & (@as(c_uint, 1) << @intCast(i)) != 0);
+        d.setScheme(if (m.tag == i) s[SchemeSel] else s[SchemeNorm]);
+        _ = d.text(x, 0, @intCast(w), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), config.tags[i], urg[i]);
+        if (occ[i]) {
+            d.rect(x + boxs, boxs, @intCast(boxw), @intCast(boxw), m == selmon and m.sel != null and m.sel.?.tag == i, urg[i]);
         }
         x += w;
     }
@@ -1264,7 +1266,7 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     if (c.XGetTransientForHint(d, w, &trans) != 0) {
         if (wintoclient(trans)) |t| {
             cl.monitor = t.monitor;
-            cl.tags = t.tags;
+            cl.tag = t.tag;
         } else {
             cl.monitor = selmon;
             applyrules(cl);
@@ -1721,7 +1723,7 @@ pub fn scan() void {
 }
 
 /// Transfers a client from its current monitor to a different one. Updates the
-/// client's tags to match the destination monitor's active tagset so it becomes
+/// client's tags to match the destination monitor's active tags so it becomes
 /// immediately visible there. Re-arranges both monitors.
 fn sendmon(cl: *Client, m: *Monitor) void {
     if (cl.monitor == m) return;
@@ -1729,7 +1731,7 @@ fn sendmon(cl: *Client, m: *Monitor) void {
     cl.detach();
     cl.detachStack();
     cl.monitor = m;
-    cl.tags = m.tagset[m.selected_tags];
+    cl.tag = m.tag;
     cl.attach();
     cl.attachStack();
     focus(null);
@@ -2016,16 +2018,15 @@ pub fn spawn(arg: *const config.Arg) void {
     _ = d;
 }
 
-/// Keybinding action: moves the focused window to the tag(s) specified in arg.ui.
-/// The window disappears from the current view if the target tag isn't visible.
+/// Keybinding action: moves the focused window to the tag specified in arg.ui.
+/// The window disappears from the current view if the target tag isn't the active one.
 pub fn tag(arg: *const config.Arg) void {
     const sm = selmon orelse return;
     const sel = sm.sel orelse return;
-    if (arg.ui & config.TAGMASK != 0) {
-        sel.tags = arg.ui & config.TAGMASK;
-        focus(null);
-        arrange(sm);
-    }
+    const new_tag: u5 = @intCast(arg.ui);
+    sel.tag = new_tag;
+    focus(null);
+    arrange(sm);
 }
 
 /// Keybinding action: sends the focused window to the next/previous monitor.
@@ -2112,33 +2113,6 @@ pub fn togglefloating(_: *const config.Arg) void {
 }
 
 /// Keybinding action: XORs the focused window's tag bitmask with the given tag.
-/// This adds or removes the window from a tag without affecting other tags —
-/// useful for making a window appear on multiple tags simultaneously.
-/// Refuses to remove the last tag (would make the window invisible).
-pub fn toggletag(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const sel = sm.sel orelse return;
-    const newtags = sel.tags ^ (arg.ui & config.TAGMASK);
-    if (newtags != 0) {
-        sel.tags = newtags;
-        focus(null);
-        arrange(sm);
-    }
-}
-
-/// Keybinding action: XORs the monitor's visible tagset with the given tag.
-/// This adds or removes a tag from the view — useful for viewing windows
-/// from multiple tags at once. Refuses to hide all tags (would show nothing).
-pub fn toggleview(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const newtagset = sm.tagset[sm.selected_tags] ^ (arg.ui & config.TAGMASK);
-    if (newtagset != 0) {
-        sm.tagset[sm.selected_tags] = newtagset;
-        focus(null);
-        arrange(sm);
-    }
-}
-
 /// Removes focus decorations from a client: resets the border color to normal
 /// and re-grabs all buttons (so clicking it will re-focus). Optionally clears
 /// X input focus to root. Called before focusing a different client.
@@ -2429,15 +2403,12 @@ fn updatewmhints(cl: *Client) void {
     _ = c.XFree(wmh);
 }
 
-/// Keybinding action: switches the monitor's view to show the tag(s) in arg.ui.
-/// Uses the two-slot tagset toggle — swaps selected_tags index first, so the
-/// previous view is remembered and can be toggled back to (like the "previous
-/// channel" button on a TV remote). If arg.ui is 0, it just toggles back.
+/// Keybinding action: switches the monitor's view to the tag in arg.ui.
 pub fn view(arg: *const config.Arg) void {
     const sm = selmon orelse return;
-    if ((arg.ui & config.TAGMASK) == sm.tagset[sm.selected_tags]) return;
-    sm.selected_tags ^= 1;
-    if (arg.ui & config.TAGMASK != 0) sm.tagset[sm.selected_tags] = arg.ui & config.TAGMASK;
+    const new_tag: u5 = @intCast(arg.ui);
+    if (new_tag == sm.tag) return;
+    sm.tag = new_tag;
     focus(null);
     arrange(sm);
 }

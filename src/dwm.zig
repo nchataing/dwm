@@ -11,6 +11,7 @@ const drw = @import("drw.zig");
 const config = @import("config.zig");
 const systray = @import("systray.zig");
 const xerror = @import("xerror.zig");
+const monitor = @import("monitor.zig");
 const c = x11.c;
 
 const VERSION = "6.3";
@@ -339,101 +340,7 @@ pub const Client = struct {
     }
 };
 
-// A Monitor corresponds to a physical screen (via Xinerama).
-// Each monitor has its own client list, focus stack, tag state, and bar window.
-pub const Monitor = struct {
-    layout_symbol: [16:0]u8 = [_:0]u8{0} ** 16, // text shown in the bar for current layout (e.g. "[]=")
-    master_factor: f32 = 0, // fraction of screen width given to master area [0.05..0.95]
-    num_masters: c_int = 0, // number of windows in the master area
-    num: c_int = 0, // monitor index (0-based, matches Xinerama order)
-    bar_y: c_int = 0, // y position of the bar window
-
-    // Full monitor geometry (used for fullscreen)
-    monitor_x: c_int = 0,
-    monitor_y: c_int = 0,
-    monitor_w: c_int = 0,
-    monitor_h: c_int = 0,
-
-    // Usable "window area" geometry (excludes bar)
-    window_x: c_int = 0,
-    window_y: c_int = 0,
-    window_w: c_int = 0,
-    window_h: c_int = 0,
-
-    tag: u5 = 0, // index of the currently viewed tag (0..8)
-    selected_layout: c_uint = 0, // index (0 or 1) into lt[] for the active layout
-    showbar: bool = true,
-    topbar: bool = true,
-
-    clients: ?*Client = null, // head of the client linked list (creation order)
-    sel: ?*Client = null, // currently focused client on this monitor
-    stack: ?*Client = null, // head of the focus-stack linked list (MRU order)
-    next: ?*Monitor = null, // next monitor in the global linked list
-
-    barwin: x11.Window = 0, // the X11 window used for the status bar
-    lt: [2]*const config.Layout = undefined, // two remembered layouts (toggle with setlayout)
-
-    /// Allocates and initializes a new Monitor with config defaults.
-    pub fn create() ?*Monitor {
-        const m = alloc.create(Monitor) catch return null;
-        m.* = Monitor{};
-        m.master_factor = config.master_factor;
-        m.num_masters = config.num_masters;
-        m.showbar = config.showbar;
-        m.topbar = config.topbar;
-        m.lt[0] = &config.layouts[0];
-        m.lt[1] = &config.layouts[1 % config.layouts.len];
-        const sym = std.mem.span(config.layouts[0].symbol);
-        @memcpy(m.layout_symbol[0..sym.len], sym);
-        return m;
-    }
-
-    /// Removes this monitor from the global list, destroys its bar window, and frees it.
-    pub fn destroy(self: *Monitor) void {
-        const d = dpy orelse return;
-        if (self == mons) {
-            mons = mons.?.next;
-        } else {
-            var m = mons;
-            while (m) |mm| : (m = mm.next) {
-                if (mm.next == self) {
-                    mm.next = self.next;
-                    break;
-                }
-            }
-        }
-        _ = c.XUnmapWindow(d, self.barwin);
-        _ = c.XDestroyWindow(d, self.barwin);
-        alloc.destroy(self);
-    }
-
-    /// Calculates bar Y position and adjusts the usable window area to exclude the bar.
-    pub fn updateBarPos(self: *Monitor) void {
-        self.window_y = self.monitor_y;
-        self.window_h = self.monitor_h;
-        if (self.showbar) {
-            self.window_h -= bar_height;
-            self.bar_y = if (self.topbar) self.window_y else self.window_y + self.window_h;
-            self.window_y = if (self.topbar) self.window_y + bar_height else self.window_y;
-        } else {
-            self.bar_y = -bar_height;
-        }
-    }
-
-    /// Returns the area of intersection between a rectangle and this monitor's window area.
-    pub fn intersect(self: *Monitor, x: c_int, y: c_int, w: c_int, h: c_int) c_int {
-        return @max(0, @min(x + w, self.window_x + self.window_w) - @max(x, self.window_x)) *
-            @max(0, @min(y + h, self.window_y + self.window_h) - @max(y, self.window_y));
-    }
-
-    /// Updates the layout symbol and invokes the current layout's arrange function.
-    pub fn applyLayout(self: *Monitor) void {
-        const sym = std.mem.span(self.lt[self.selected_layout].symbol);
-        @memcpy(self.layout_symbol[0..sym.len], sym);
-        if (sym.len < self.layout_symbol.len) self.layout_symbol[sym.len] = 0;
-        if (self.lt[self.selected_layout].arrange) |arrange_fn| arrange_fn(self);
-    }
-};
+pub const Monitor = monitor.Monitor;
 
 // --- Global state ---
 // These mirror the globals from the original dwm.c. They are set once during
@@ -602,7 +509,7 @@ fn buttonpress(e: *x11.XEvent) void {
     var arg = config.Arg{ .i = 0 };
 
     // focus monitor if necessary
-    if (wintomon(ev.window)) |m| {
+    if (monitor.fromWindow(ev.window)) |m| {
         if (m != selmon) {
             if (selmon) |sm| unfocus(sm.sel, true);
             selmon = m;
@@ -736,7 +643,7 @@ fn configurenotify(e: *x11.XEvent) void {
         const dirty = (screen_width != ev.width or screen_height != ev.height);
         screen_width = ev.width;
         screen_height = ev.height;
-        if (updategeom() or dirty) {
+        if (monitor.updateGeometry() or dirty) {
             if (draw) |dr| dr.resize(@intCast(screen_width), @intCast(bar_height));
             updatebars();
             var m = mons;
@@ -822,30 +729,6 @@ fn destroynotify(e: *x11.XEvent) void {
     }
 }
 
-/// Returns the next or previous monitor relative to selmon, wrapping around.
-/// Used by focusmon/tagmon keybindings to cycle through monitors.
-fn dirtomon(dir: c_int) ?*Monitor {
-    const sm = selmon orelse return null;
-    if (dir > 0) {
-        return sm.next orelse mons;
-    } else {
-        if (sm == mons) {
-            var m = mons;
-            while (m) |mm| {
-                if (mm.next == null) return mm;
-                m = mm.next;
-            }
-            return null;
-        } else {
-            var m = mons;
-            while (m) |mm| : (m = mm.next) {
-                if (mm.next == sm) return mm;
-            }
-            return null;
-        }
-    }
-}
-
 /// Renders the entire status bar for one monitor: tag indicators (with
 /// occupancy dots and urgency highlighting), the layout symbol, the focused
 /// window's title, and the root window name as status text. The bar is drawn
@@ -926,7 +809,7 @@ fn enternotify(e: *x11.XEvent) void {
     const ev = &e.xcrossing;
     if ((ev.mode != x11.NotifyNormal or ev.detail == x11.NotifyInferior) and ev.window != root) return;
     const cl = wintoclient(ev.window);
-    const m = if (cl) |c_cl| c_cl.monitor else wintomon(ev.window);
+    const m = if (cl) |c_cl| c_cl.monitor else monitor.fromWindow(ev.window);
     const mon = m orelse return;
     if (mon != selmon) {
         if (selmon) |sm| unfocus(sm.sel, true);
@@ -943,7 +826,7 @@ fn enternotify(e: *x11.XEvent) void {
 fn expose(e: *x11.XEvent) void {
     const ev = &e.xexpose;
     if (ev.count == 0) {
-        if (wintomon(ev.window)) |m| {
+        if (monitor.fromWindow(ev.window)) |m| {
             drawbar(m);
             if (m == selmon) systray.update();
         }
@@ -1003,7 +886,7 @@ fn focusin(e: *x11.XEvent) void {
 /// Unfocuses the current selection first so the border color updates correctly.
 pub fn focusmon(arg: *const config.Arg) void {
     if (mons == null or mons.?.next == null) return;
-    const m = dirtomon(arg.i) orelse return;
+    const m = monitor.adjacent(arg.i) orelse return;
     if (m == selmon) return;
     if (selmon) |sm| unfocus(sm.sel, false);
     selmon = m;
@@ -1078,8 +961,8 @@ pub fn getatomprop(cl: *Client, prop: x11.Atom) x11.Atom {
 
 /// Queries the current pointer position relative to the root window.
 /// Used by movemouse/resizemouse to get the starting cursor position, and
-/// by motionnotify/wintomon to determine which monitor the cursor is on.
-fn getrootptr(x: *c_int, y: *c_int) bool {
+/// by motionnotify/monitor.fromWindow to determine which monitor the cursor is on.
+pub fn getrootptr(x: *c_int, y: *c_int) bool {
     const d = dpy orelse return false;
     var di: c_int = undefined;
     var dui: c_uint = undefined;
@@ -1186,19 +1069,6 @@ pub fn incnmaster(arg: *const config.Arg) void {
     const sm = selmon orelse return;
     sm.num_masters = @max(sm.num_masters + arg.i, 0);
     arrange(sm);
-}
-
-/// Deduplicates Xinerama screen geometries. Some configurations report the
-/// same physical screen multiple times (e.g. mirrored displays); we only
-/// want to create one Monitor per unique geometry.
-fn isuniquegeom(unique: [*]x11.XineramaScreenInfo, n: usize, info: *allowzero x11.XineramaScreenInfo) bool {
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (unique[i].x_org == info.x_org and unique[i].y_org == info.y_org and
-            unique[i].width == info.width and unique[i].height == info.height)
-            return false;
-    }
-    return true;
 }
 
 /// X11 KeyPress event handler. Translates the hardware keycode to a keysym,
@@ -1373,7 +1243,7 @@ fn motionnotify(e: *x11.XEvent) void {
     };
     const ev = &e.xmotion;
     if (ev.window != root) return;
-    const m = recttomon(ev.x_root, ev.y_root, 1, 1);
+    const m = monitor.fromRect(ev.x_root, ev.y_root, 1, 1);
     if (m != S.mon and S.mon != null) {
         if (selmon) |sm| unfocus(sm.sel, true);
         selmon = m;
@@ -1436,7 +1306,7 @@ pub fn movemouse(_: *const config.Arg) void {
         }
     }
     _ = c.XUngrabPointer(d, x11.CurrentTime);
-    if (recttomon(cl.x, cl.y, cl.w, cl.h)) |m| {
+    if (monitor.fromRect(cl.x, cl.y, cl.w, cl.h)) |m| {
         if (m != selmon) {
             sendmon(cl, m);
             selmon = m;
@@ -1520,23 +1390,6 @@ fn propertynotify(e: *x11.XEvent) void {
 /// and triggers cleanup. This is the "quit dwm" action.
 pub fn quit(_: *const config.Arg) void {
     running = false;
-}
-
-/// Finds which monitor a rectangle overlaps with the most. Used after mouse
-/// operations to determine which monitor a moved/resized window belongs to,
-/// and to figure out which monitor the root window cursor is on.
-fn recttomon(x: c_int, y: c_int, w: c_int, h: c_int) ?*Monitor {
-    var r = selmon;
-    var area: c_int = 0;
-    var m = mons;
-    while (m) |mon| : (m = mon.next) {
-        const a = mon.intersect(x, y, w, h);
-        if (a > area) {
-            area = a;
-            r = mon;
-        }
-    }
-    return r;
 }
 
 /// High-level resize: applies size hints to the requested geometry, then calls
@@ -1623,7 +1476,7 @@ pub fn resizemouse(_: *const config.Arg) void {
     _ = c.XWarpPointer(d, x11.None, cl.window, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
     _ = c.XUngrabPointer(d, x11.CurrentTime);
     while (c.XCheckMaskEvent(d, x11.EnterWindowMask, &ev) != 0) {}
-    if (recttomon(cl.x, cl.y, cl.w, cl.h)) |m| {
+    if (monitor.fromRect(cl.x, cl.y, cl.w, cl.h)) |m| {
         if (m != selmon) {
             sendmon(cl, m);
             selmon = m;
@@ -1880,7 +1733,7 @@ pub fn setup() void {
     }
     text_lr_pad = @intCast(dr.fonts.?.h);
     bar_height = @as(c_int, @intCast(dr.fonts.?.h)) + 2;
-    _ = updategeom();
+    _ = monitor.updateGeometry();
 
     // init atoms
     const utf8string = c.XInternAtom(d, "UTF8_STRING", x11.False);
@@ -2032,7 +1885,7 @@ pub fn tagmon(arg: *const config.Arg) void {
     const sel = sm.sel orelse return;
     _ = sel;
     if (mons == null or mons.?.next == null) return;
-    if (dirtomon(arg.i)) |m| sendmon(sm.sel.?, m);
+    if (monitor.adjacent(arg.i)) |m| sendmon(sm.sel.?, m);
 }
 
 /// Master-stack tiling layout (the default "[]=" layout). Splits the monitor
@@ -2209,117 +2062,6 @@ fn updateclientlist() void {
     }
 }
 
-/// Queries Xinerama for the current screen layout and syncs the monitor list
-/// to match. Creates new monitors for newly detected screens, updates geometry
-/// for changed screens, and migrates clients from removed monitors to the
-/// first monitor. Returns true if anything changed (triggers bar/focus updates).
-fn updategeom() bool {
-    const d = dpy orelse return false;
-    var dirty: bool = false;
-
-    if (c.XineramaIsActive(d) != 0) {
-        var nn: c_int = undefined;
-        const info = c.XineramaQueryScreens(d, &nn);
-        var n: c_int = 0;
-        {
-            var m = mons;
-            while (m) |mon| : (m = mon.next) n += 1;
-        }
-
-        const raw_ptr: ?[*]align(@alignOf(x11.XineramaScreenInfo)) u8 = @ptrCast(@alignCast(std.c.calloc(@intCast(nn), @sizeOf(x11.XineramaScreenInfo))));
-        const unique_ptr: [*]x11.XineramaScreenInfo = @ptrCast(raw_ptr orelse return false);
-        var j: usize = 0;
-        var i: c_int = 0;
-        while (i < nn) : (i += 1) {
-            if (isuniquegeom(unique_ptr, j, &info[@intCast(i)])) {
-                unique_ptr[j] = info[@intCast(i)];
-                j += 1;
-            }
-        }
-        _ = c.XFree(info);
-        nn = @intCast(j);
-
-        if (n <= nn) {
-            // new monitors available
-            i = 0;
-            while (i < nn - n) : (i += 1) {
-                var m = mons;
-                while (m != null and m.?.next != null) m = m.?.next;
-                if (m) |mm| {
-                    mm.next = Monitor.create();
-                } else {
-                    mons = Monitor.create();
-                }
-            }
-            i = 0;
-            var m = mons;
-            while (i < nn and m != null) : ({
-                i += 1;
-                m = m.?.next;
-            }) {
-                const mm = m.?;
-                const ui: usize = @intCast(i);
-                if (i >= n or unique_ptr[ui].x_org != @as(c_short, @intCast(mm.monitor_x)) or unique_ptr[ui].y_org != @as(c_short, @intCast(mm.monitor_y)) or
-                    unique_ptr[ui].width != @as(c_short, @intCast(mm.monitor_w)) or unique_ptr[ui].height != @as(c_short, @intCast(mm.monitor_h)))
-                {
-                    dirty = true;
-                    mm.num = i;
-                    mm.monitor_x = unique_ptr[ui].x_org;
-                    mm.window_x = mm.monitor_x;
-                    mm.monitor_y = unique_ptr[ui].y_org;
-                    mm.window_y = mm.monitor_y;
-                    mm.monitor_w = unique_ptr[ui].width;
-                    mm.window_w = mm.monitor_w;
-                    mm.monitor_h = unique_ptr[ui].height;
-                    mm.window_h = mm.monitor_h;
-                    mm.updateBarPos();
-                }
-            }
-        } else {
-            // less monitors available
-            i = nn;
-            while (i < n) : (i += 1) {
-                var m = mons;
-                while (m != null and m.?.next != null) m = m.?.next;
-                if (m) |mm| {
-                    while (mm.clients) |cl_c| {
-                        dirty = true;
-                        mm.clients = cl_c.next;
-                        cl_c.detachStack();
-                        cl_c.monitor = mons;
-                        if (mons) |first| {
-                            _ = first;
-                            cl_c.attach();
-                            cl_c.attachStack();
-                        }
-                    }
-                    if (mm == selmon) selmon = mons;
-                    mm.destroy();
-                }
-            }
-        }
-        std.c.free(unique_ptr);
-    } else {
-        // default monitor setup
-        if (mons == null) mons = Monitor.create();
-        if (mons) |m| {
-            if (m.monitor_w != screen_width or m.monitor_h != screen_height) {
-                dirty = true;
-                m.monitor_w = screen_width;
-                m.window_w = screen_width;
-                m.monitor_h = screen_height;
-                m.window_h = screen_height;
-                m.updateBarPos();
-            }
-        }
-    }
-    if (dirty) {
-        selmon = mons;
-        selmon = wintomon(root);
-    }
-    return dirty;
-}
-
 /// Discovers which modifier bit corresponds to Num Lock by scanning the
 /// modifier map for XK_Num_Lock. This varies by system, so we re-detect
 /// it before grabbing keys/buttons to ensure our modifier masks are correct.
@@ -2409,7 +2151,7 @@ pub fn view(arg: *const config.Arg) void {
 
 /// Looks up a Client by its X window ID across all monitors. Returns null if
 /// the window isn't managed (e.g. it's a bar, root, or unmanaged window).
-fn wintoclient(w: x11.Window) ?*Client {
+pub fn wintoclient(w: x11.Window) ?*Client {
     var m = mons;
     while (m) |mon| : (m = mon.next) {
         var cl_it = mon.clients;
@@ -2418,21 +2160,6 @@ fn wintoclient(w: x11.Window) ?*Client {
         }
     }
     return null;
-}
-
-/// Determines which monitor a window belongs to: checks if it's the root
-/// (uses pointer position), a bar window (returns that monitor), or a client
-/// (returns client's monitor). Falls back to selmon for unknown windows.
-fn wintomon(w: x11.Window) ?*Monitor {
-    var x: c_int = 0;
-    var y: c_int = 0;
-    if (w == root and getrootptr(&x, &y)) return recttomon(x, y, 1, 1);
-    var m = mons;
-    while (m) |mon| : (m = mon.next) {
-        if (w == mon.barwin) return mon;
-    }
-    if (wintoclient(w)) |cl| return cl.monitor;
-    return selmon;
 }
 
 /// Keybinding action: promotes the focused window to the master area. If it's

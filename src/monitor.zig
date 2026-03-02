@@ -6,13 +6,17 @@
 
 const std = @import("std");
 const x11 = @import("x11.zig");
-const config = @import("config.zig");
 const layout = @import("layout.zig");
 const bar = @import("bar.zig");
 const dwm = @import("dwm.zig");
 const c = x11.c;
 
 const alloc = std.heap.c_allocator;
+
+// ── Monitor config ──
+pub const master_factor: f32 = 0.6;
+pub const showbar: bool = true;
+pub const topbar: bool = true;
 
 // A Monitor corresponds to a physical screen (via Xinerama).
 // Each monitor has its own client list, focus stack, tag state, and bar window.
@@ -50,9 +54,9 @@ pub const Monitor = struct {
     pub fn create() ?*Monitor {
         const m = alloc.create(Monitor) catch return null;
         m.* = Monitor{};
-        m.master_factor = config.master_factor;
-        m.showbar = config.showbar;
-        m.topbar = config.topbar;
+        m.master_factor = master_factor;
+        m.showbar = showbar;
+        m.topbar = topbar;
         m.layout = &layout.layouts[0];
         const sym = std.mem.span(layout.layouts[0].symbol);
         @memcpy(m.layout_symbol[0..sym.len], sym);

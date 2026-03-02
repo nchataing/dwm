@@ -7,12 +7,14 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
-const config = @import("config.zig");
 const systray = @import("systray.zig");
 const dwm = @import("dwm.zig");
 const c = x11.c;
 
 const Monitor = dwm.Monitor;
+
+// ── Bar config ──────────────────────────────────────────────────────────────
+pub const tags = [_][*:0]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 
 // ── Bar state ───────────────────────────────────────────────────────────────
 
@@ -40,7 +42,7 @@ pub fn drawbar(m: *Monitor) void {
     if (!m.showbar) return;
 
     var stw: c_uint = 0;
-    if (systray.systraytomon(m) == m and !config.systrayonleft)
+    if (systray.systraytomon(m) == m and !systray.systrayonleft)
         stw = systray.getsystraywidth();
 
     // draw status first
@@ -53,8 +55,8 @@ pub fn drawbar(m: *Monitor) void {
 
     systray.resizebarwin(m);
 
-    var occ = [_]bool{false} ** config.tags.len; // which tags have clients
-    var urg = [_]bool{false} ** config.tags.len; // which tags have urgent clients
+    var occ = [_]bool{false} ** tags.len; // which tags have clients
+    var urg = [_]bool{false} ** tags.len; // which tags have urgent clients
     var cl_it = m.clients;
     while (cl_it) |cl_c| : (cl_it = cl_c.next) {
         occ[cl_c.tag] = true;
@@ -65,10 +67,10 @@ pub fn drawbar(m: *Monitor) void {
     const boxs = @divTrunc(@as(c_int, @intCast(d.fonts.?.h)), 9);
     const boxw = @divTrunc(@as(c_int, @intCast(d.fonts.?.h)), 6) + 2;
 
-    for (0..config.tags.len) |i| {
-        const w = textWidth(config.tags[i]);
+    for (0..tags.len) |i| {
+        const w = textWidth(tags[i]);
         d.setScheme(if (m.tag == i) s[dwm.SchemeSel] else s[dwm.SchemeNorm]);
-        _ = d.text(x, 0, @intCast(w), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), config.tags[i], urg[i]);
+        _ = d.text(x, 0, @intCast(w), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), tags[i], urg[i]);
         if (occ[i]) {
             d.rect(x + boxs, boxs, @intCast(boxw), @intCast(boxw), m == dwm.selmon and m.sel != null and m.sel.?.tag == i, urg[i]);
         }

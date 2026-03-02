@@ -1,10 +1,10 @@
 // actions.zig — Keybinding action functions.
-// All functions here have the uniform signature `fn(*const config.Arg) void`
+// All functions here have the uniform signature `fn(*const events.Arg) void`
 // (or are helpers called exclusively by such functions). They are wired up
-// in config.zig's `keys` and `buttons` tables.
+// in events.zig's `keys` and `buttons` tables.
 const std = @import("std");
 const x11 = @import("x11.zig");
-const config = @import("config.zig");
+const events = @import("events.zig");
 const dwm = @import("dwm.zig");
 const xerror = @import("xerror.zig");
 const monitor = @import("monitor.zig");
@@ -13,11 +13,15 @@ const bar = @import("bar.zig");
 const systray = @import("systray.zig");
 const c = x11.c;
 
+// ── Action config ──────────────────────────────────────────────────────────
+pub const snap: c_uint = 32; // snap pixel: proximity threshold for edge snapping during mouse moves
+pub const lockfullscreen: bool = true; // true will force focus on the fullscreen window
+
 // --- Keybinding actions ---
 
 /// Switches focus to the next/previous monitor.
 /// Unfocuses the current selection first so the border color updates correctly.
-pub fn focusMonitor(arg: *const config.Arg) void {
+pub fn focusMonitor(arg: *const events.Arg) void {
     if (dwm.mons == null or dwm.mons.?.next == null) return;
     const m = monitor.adjacent(arg.i) orelse return;
     if (m == dwm.selmon) return;
@@ -30,10 +34,10 @@ pub fn focusMonitor(arg: *const config.Arg) void {
 /// client in the tiling order. Wraps around at the ends of the client list.
 /// Respects lockfullscreen — if the focused client is fullscreen, focus
 /// stays put to prevent accidental switches.
-pub fn focusStack(arg: *const config.Arg) void {
+pub fn focusStack(arg: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     const sel = sm.sel orelse return;
-    if (sel.isfullscreen and config.lockfullscreen) return;
+    if (sel.isfullscreen and lockfullscreen) return;
 
     var found: ?*dwm.Client = null;
     if (arg.i > 0) {
@@ -70,10 +74,10 @@ pub fn focusStack(arg: *const config.Arg) void {
 
 /// Interactive window move via mouse drag. Grabs the pointer, enters a local
 /// event loop tracking mouse motion, and moves the window in real-time. Snaps
-/// to monitor edges when within `config.snap` pixels. If the window was tiled,
+/// to monitor edges when within `snap` pixels. If the window was tiled,
 /// dragging it beyond the snap threshold auto-floats it. On release, if the
 /// window landed on a different monitor, it's sent there.
-pub fn moveMouse(_: *const config.Arg) void {
+pub fn moveMouse(_: *const events.Arg) void {
     const d = dwm.dpy orelse return;
     const sm = dwm.selmon orelse return;
     const cl = sm.sel orelse return;
@@ -99,20 +103,20 @@ pub fn moveMouse(_: *const config.Arg) void {
                 lasttime = ev.xmotion.time;
                 var nx = ocx + (ev.xmotion.x - x);
                 var ny = ocy + (ev.xmotion.y - y);
-                if (@abs(sm.window_x - nx) < config.snap) {
+                if (@abs(sm.window_x - nx) < snap) {
                     nx = sm.window_x;
-                } else if (@abs((sm.window_x + sm.window_w) - (nx + cl.getWidth())) < config.snap) {
+                } else if (@abs((sm.window_x + sm.window_w) - (nx + cl.getWidth())) < snap) {
                     nx = sm.window_x + sm.window_w - cl.getWidth();
                 }
-                if (@abs(sm.window_y - ny) < config.snap) {
+                if (@abs(sm.window_y - ny) < snap) {
                     ny = sm.window_y;
-                } else if (@abs((sm.window_y + sm.window_h) - (ny + cl.getHeight())) < config.snap) {
+                } else if (@abs((sm.window_y + sm.window_h) - (ny + cl.getHeight())) < snap) {
                     ny = sm.window_y + sm.window_h - cl.getHeight();
                 }
                 if (!cl.isfloating and sm.layout.arrange != null and
-                    (@abs(nx - cl.x) > @as(c_int, config.snap) or @abs(ny - cl.y) > @as(c_int, config.snap)))
+                    (@abs(nx - cl.x) > @as(c_int, snap) or @abs(ny - cl.y) > @as(c_int, snap)))
                 {
-                    toggleFloating(&config.Arg{ .i = 0 });
+                    toggleFloating(&events.Arg{ .i = 0 });
                 }
                 if (sm.layout.arrange == null or cl.isfloating)
                     cl.resize(nx, ny, cl.w, cl.h, true);
@@ -135,7 +139,7 @@ pub fn moveMouse(_: *const config.Arg) void {
 /// the cursor to the bottom-right corner and tracks the delta as new
 /// width/height. Auto-floats tiled windows when dragged beyond the snap
 /// threshold. On release, sends the window to whichever monitor it overlaps most.
-pub fn resizeMouse(_: *const config.Arg) void {
+pub fn resizeMouse(_: *const events.Arg) void {
     const d = dwm.dpy orelse return;
     const sm = dwm.selmon orelse return;
     const cl = sm.sel orelse return;
@@ -163,9 +167,9 @@ pub fn resizeMouse(_: *const config.Arg) void {
                     cl.monitor.?.window_y + nh >= sm.window_y and cl.monitor.?.window_y + nh <= sm.window_y + sm.window_h)
                 {
                     if (!cl.isfloating and sm.layout.arrange != null and
-                        (@abs(nw - cl.w) > @as(c_int, config.snap) or @abs(nh - cl.h) > @as(c_int, config.snap)))
+                        (@abs(nw - cl.w) > @as(c_int, snap) or @abs(nh - cl.h) > @as(c_int, snap)))
                     {
-                        toggleFloating(&config.Arg{ .i = 0 });
+                        toggleFloating(&events.Arg{ .i = 0 });
                     }
                 }
                 if (sm.layout.arrange == null or cl.isfloating)
@@ -190,7 +194,7 @@ pub fn resizeMouse(_: *const config.Arg) void {
 /// Gracefully closes the focused window. First tries WM_DELETE_WINDOW (the
 /// polite ICCCM way that lets the app save state); if the client doesn't
 /// support that protocol, forcefully kills it with XKillClient as a last resort.
-pub fn killClient(_: *const config.Arg) void {
+pub fn killClient(_: *const events.Arg) void {
     const d = dwm.dpy orelse return;
     const sm = dwm.selmon orelse return;
     const sel = sm.sel orelse return;
@@ -210,13 +214,13 @@ pub fn killClient(_: *const config.Arg) void {
 /// the X display fd (inherited from parent) and starts a new session so it's not
 /// tied to dwm's process group. If the command is dmenu, the monitor number is
 /// patched into the argv so dmenu appears on the correct screen.
-pub fn spawn(arg: *const config.Arg) void {
+pub fn spawn(arg: *const events.Arg) void {
     const d = dwm.dpy orelse return;
     const v = arg.v orelse return;
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(v));
 
     // Update dmenumon if this is the dmenu command
-    if (argv == @as([*:null]const ?[*:0]const u8, @ptrCast(&config.dmenucmd))) {
+    if (argv == @as([*:null]const ?[*:0]const u8, @ptrCast(&events.dmenucmd))) {
         if (dwm.selmon) |sm| {
             dwm.dmenumon_buf[0] = '0' + @as(u8, @intCast(sm.num));
         }
@@ -241,7 +245,7 @@ pub fn spawn(arg: *const config.Arg) void {
 
 /// Moves the focused window to the tag specified in arg.ui. The window
 /// disappears from the current view if the target tag isn't the active one.
-pub fn tag(arg: *const config.Arg) void {
+pub fn tag(arg: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     const sel = sm.sel orelse return;
     const new_tag: u5 = @intCast(arg.ui);
@@ -252,7 +256,7 @@ pub fn tag(arg: *const config.Arg) void {
 
 /// Sends the focused window to the next/previous monitor. The window gets
 /// the destination monitor's active tags so it's visible there.
-pub fn tagMonitor(arg: *const config.Arg) void {
+pub fn tagMonitor(arg: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     const sel = sm.sel orelse return;
     _ = sel;
@@ -263,7 +267,7 @@ pub fn tagMonitor(arg: *const config.Arg) void {
 /// Shows or hides the status bar. Updates the bar position, resizes the bar
 /// window (and systray if present), and re-arranges so tiled windows expand
 /// into the freed space (or shrink to make room for the bar).
-pub fn toggleBar(_: *const config.Arg) void {
+pub fn toggleBar(_: *const events.Arg) void {
     const d = dwm.dpy orelse return;
     const sm = dwm.selmon orelse return;
     sm.showbar = !sm.showbar;
@@ -285,7 +289,7 @@ pub fn toggleBar(_: *const config.Arg) void {
 /// Toggles the focused window between floating and tiled. Fixed-size windows
 /// (equal min and max hints) are always forced to floating. Blocked while
 /// fullscreen to prevent layout corruption.
-pub fn toggleFloating(_: *const config.Arg) void {
+pub fn toggleFloating(_: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     const sel = sm.sel orelse return;
     if (sel.isfullscreen) return;
@@ -296,7 +300,7 @@ pub fn toggleFloating(_: *const config.Arg) void {
 }
 
 /// Switches the monitor's view to the tag in arg.ui.
-pub fn view(arg: *const config.Arg) void {
+pub fn view(arg: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     const new_tag: u5 = @intCast(arg.ui);
     if (new_tag == sm.tag) return;
@@ -306,7 +310,7 @@ pub fn view(arg: *const config.Arg) void {
 }
 
 /// Switches the active layout to the one specified by arg.v.
-pub fn setLayout(arg: *const config.Arg) void {
+pub fn setLayout(arg: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     if (arg.v) |v| {
         sm.layout = @ptrCast(@alignCast(v));
@@ -324,7 +328,7 @@ pub fn setLayout(arg: *const config.Arg) void {
 /// Adjusts the master area size ratio. If arg.f < 1.0, it's treated as a
 /// relative delta added to the current factor; if >= 1.0, it's an absolute
 /// value (minus 1.0). Clamped to [0.05, 0.95] so neither area disappears.
-pub fn setMasterFactor(arg: *const config.Arg) void {
+pub fn setMasterFactor(arg: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     if (sm.layout.arrange == null) return;
     const f = if (arg.f < 1.0) arg.f + sm.master_factor else arg.f - 1.0;
@@ -337,7 +341,7 @@ pub fn setMasterFactor(arg: *const config.Arg) void {
 /// (first tiled client), promotes the second tiled client instead — effectively
 /// swapping master and top-of-stack. No-op for floating clients or layouts
 /// without a master area.
-pub fn zoom(_: *const config.Arg) void {
+pub fn zoom(_: *const events.Arg) void {
     const sm = dwm.selmon orelse return;
     var cl = sm.sel orelse return;
     if (sm.layout.arrange == null or (sm.sel != null and sm.sel.?.isfloating)) return;
@@ -348,7 +352,7 @@ pub fn zoom(_: *const config.Arg) void {
 }
 
 /// Sets running to false, which exits the main event loop and triggers cleanup.
-pub fn quit(_: *const config.Arg) void {
+pub fn quit(_: *const events.Arg) void {
     dwm.running = false;
 }
 
@@ -380,9 +384,9 @@ pub fn fakeKeyPress(keysym: x11.KeySym) void {
 /// Custom keybinding action: sends an F1 keypress to the current window, waits
 /// briefly for it to process, then moves focus to the next window in the stack.
 /// This is a user-specific workflow shortcut.
-pub fn f1SwitchFocus(_: *const config.Arg) void {
+pub fn f1SwitchFocus(_: *const events.Arg) void {
     fakeKeyPress(x11.XK_F1);
     _ = c.usleep(10 * 1000); // 10ms
-    const arg = config.Arg{ .i = 1 };
+    const arg = events.Arg{ .i = 1 };
     focusStack(&arg);
 }

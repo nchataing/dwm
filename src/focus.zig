@@ -10,7 +10,7 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
-const config = @import("config.zig");
+const events = @import("events.zig");
 const bar = @import("bar.zig");
 const dwm = @import("dwm.zig");
 const c = x11.c;
@@ -97,7 +97,7 @@ pub fn focusin(e: *x11.XEvent) void {
 
 /// Sets up X button grabs on a client window. When unfocused, we grab all
 /// buttons so clicking anywhere on the window first focuses it. When focused,
-/// we only grab the specific modifier+button combos from config.buttons,
+/// we only grab the specific modifier+button combos from events.buttons,
 /// letting normal clicks pass through to the application. Modifier variants
 /// (with NumLock, CapsLock) are grabbed to handle all lock-key states.
 pub fn grabbuttons(cl: *Client, focused: bool) void {
@@ -108,8 +108,8 @@ pub fn grabbuttons(cl: *Client, focused: bool) void {
     if (!focused) {
         _ = c.XGrabButton(d, x11.AnyButton, x11.AnyModifier, cl.window, x11.False, @intCast(dwm.BUTTONMASK()), x11.GrabModeSync, x11.GrabModeSync, x11.None, x11.None);
     }
-    for (&config.buttons) |*btn| {
-        if (btn.click == config.ClkClientWin) {
+    for (&events.buttons) |*btn| {
+        if (btn.click == events.ClkClientWin) {
             for (modifiers) |mod| {
                 _ = c.XGrabButton(d, @intCast(btn.button), btn.mask | mod, cl.window, x11.False, @intCast(dwm.BUTTONMASK()), x11.GrabModeAsync, x11.GrabModeSync, x11.None, x11.None);
             }

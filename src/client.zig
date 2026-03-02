@@ -8,7 +8,6 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
-const config = @import("config.zig");
 const xerror = @import("xerror.zig");
 const layout = @import("layout.zig");
 const bar = @import("bar.zig");
@@ -17,6 +16,24 @@ const c = x11.c;
 
 const Monitor = dwm.Monitor;
 const alloc = std.heap.c_allocator;
+
+// ── Client config ──────────────────────────────────────────────────────────
+pub const borderpx: c_uint = 1; // border pixel of windows
+pub const resizehints: bool = false; // true means respect size hints in tiled resizals (can cause gaps)
+
+pub const Rule = struct {
+    class: ?[*:0]const u8,
+    instance: ?[*:0]const u8,
+    title: ?[*:0]const u8,
+    tag: ?u5, // null = inherit monitor's current tag
+    isfloating: bool,
+    monitor: i32,
+};
+
+pub const rules = [_]Rule{
+    .{ .class = "Gimp", .instance = null, .title = null, .tag = null, .isfloating = true, .monitor = -1 },
+    .{ .class = "Firefox", .instance = null, .title = null, .tag = 8, .isfloating = false, .monitor = -1 },
+};
 
 // Fallback window title when WM_NAME is empty.
 const broken: [*:0]const u8 = "broken";
@@ -296,7 +313,7 @@ pub const Client = struct {
         if (h.* < bar.bar_height) h.* = bar.bar_height;
         if (w.* < bar.bar_height) w.* = bar.bar_height;
 
-        if (config.resizehints or self.isfloating or (self.monitor != null and self.monitor.?.layout.arrange == null)) {
+        if (resizehints or self.isfloating or (self.monitor != null and self.monitor.?.layout.arrange == null)) {
             self.size_hints.apply(w, h);
         }
         return x.* != self.x or y.* != self.y or w.* != self.w or h.* != self.h;
@@ -514,7 +531,7 @@ pub fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     } else {
         cl.y = @max(cl.y, m.monitor_y);
     }
-    cl.border_width = @intCast(config.borderpx);
+    cl.border_width = @intCast(borderpx);
 
     var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
     wc.border_width = cl.border_width;
@@ -545,7 +562,7 @@ pub fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     dwm.focus(null);
 }
 
-/// Matches a newly managed client against the user-defined rules in config.zig.
+/// Matches a newly managed client against the user-defined rules in events.zig.
 /// This is how windows automatically get assigned to specific tags, monitors, or
 /// floating state based on their WM_CLASS / title — without it, every new window
 /// would just land on the current tag of the focused monitor.
@@ -560,7 +577,7 @@ fn applyRules(cl: *Client) void {
     const class_str: [*:0]const u8 = if (ch.res_class) |cls| cls else broken;
     const instance_str: [*:0]const u8 = if (ch.res_name) |name| name else broken;
 
-    for (&config.rules) |*r| {
+    for (&rules) |*r| {
         if (r.title == null or containsSubstring(&cl.name, r.title.?)) {
             if (r.class == null or containsSubstring(class_str, r.class.?)) {
                 if (r.instance == null or containsSubstring(instance_str, r.instance.?)) {

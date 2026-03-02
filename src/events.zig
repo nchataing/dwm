@@ -9,7 +9,7 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
-const config = @import("config.zig");
+const actions = @import("actions.zig");
 const systray = @import("systray.zig");
 const monitor = @import("monitor.zig");
 const layout = @import("layout.zig");
@@ -24,6 +24,122 @@ const Monitor = dwm.Monitor;
 
 const focus = focus_mod.focus;
 const unfocus = focus_mod.unfocus;
+
+// ── Input config ────────────────────────────────────────────────────────────
+
+// MODKEY is the modifier key used for all dwm keybindings (Mod4 = Super/Win key).
+pub const MODKEY = x11.Mod4Mask;
+
+/// Tagged union for passing different argument types to keybinding/button callbacks.
+pub const Arg = union {
+    i: c_int,
+    ui: c_uint,
+    f: f32,
+    v: ?*const anyopaque,
+};
+
+pub const Key = struct {
+    mod: c_uint,
+    keysym: x11.KeySym,
+    func: *const fn (*const Arg) void,
+    arg: Arg,
+};
+
+pub const Button = struct {
+    click: c_uint,
+    mask: c_uint,
+    button: c_uint,
+    func: *const fn (*const Arg) void,
+    arg: Arg,
+};
+
+// ── Commands ────────────────────────────────────────────────────────────────
+// Null-terminated argv arrays passed to spawn(). The dmenu command receives
+// monitor number and color scheme args so it matches dwm's appearance.
+pub const dmenucmd = [_:null]?[*:0]const u8{
+    "dmenu_run",
+    "-m",
+    &dwm.dmenumon_buf,
+    "-fn",
+    dwm.dmenufont,
+    "-nb",
+    dwm.col_gray1,
+    "-nf",
+    dwm.col_gray3,
+    "-sb",
+    dwm.col_cyan,
+    "-sf",
+    dwm.col_gray4,
+};
+pub const termcmd = [_:null]?[*:0]const u8{ "kitty", null };
+pub const screenswitchcmd = [_:null]?[*:0]const u8{ "/home/nchataing/perso/utils/screen.sh", null };
+
+/// Generate the two standard per-tag keybindings for a given key:
+///   Mod+key       → view tag          (switch to that tag)
+///   Mod+Shift+key → tag client        (move focused client to that tag)
+fn tagkeys(comptime key: x11.KeySym, comptime tag_idx: u5) [2]Key {
+    return .{
+        .{ .mod = MODKEY, .keysym = key, .func = &actions.view, .arg = .{ .ui = tag_idx } },
+        .{ .mod = MODKEY | x11.ShiftMask, .keysym = key, .func = &actions.tag, .arg = .{ .ui = tag_idx } },
+    };
+}
+
+// Keybindings. Keys are for a BEPO keyboard layout — the number row produces
+// «»()@+−/ rather than 1-9, so tagkeys use those keysyms instead of XK_1..XK_9.
+pub const keys = [_]Key{
+    .{ .mod = MODKEY, .keysym = x11.XK_p, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&dmenucmd) } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_Return, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_s, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&screenswitchcmd) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_b, .func = &actions.toggleBar, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_j, .func = &actions.focusStack, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_k, .func = &actions.focusStack, .arg = .{ .i = -1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_Tab, .func = &actions.focusStack, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_h, .func = &actions.setMasterFactor, .arg = .{ .f = -0.05 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_l, .func = &actions.setMasterFactor, .arg = .{ .f = 0.05 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_Return, .func = &actions.zoom, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_q, .func = &actions.killClient, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_t, .func = &actions.setLayout, .arg = .{ .v = @ptrCast(&layout.layouts[0]) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_f, .func = &actions.setLayout, .arg = .{ .v = @ptrCast(&layout.layouts[1]) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_m, .func = &actions.setLayout, .arg = .{ .v = @ptrCast(&layout.layouts[2]) } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_space, .func = &actions.toggleFloating, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_comma, .func = &actions.focusMonitor, .arg = .{ .i = -1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_period, .func = &actions.focusMonitor, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_comma, .func = &actions.tagMonitor, .arg = .{ .i = -1 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_period, .func = &actions.tagMonitor, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_e, .func = &actions.quit, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_F1, .func = &actions.f1SwitchFocus, .arg = .{ .i = 0 } },
+} //
+    ++ tagkeys(x11.XK_quotedbl, 0) //
+    ++ tagkeys(x11.XK_guillemotleft, 1) //
+    ++ tagkeys(x11.XK_guillemotright, 2) //
+    ++ tagkeys(x11.XK_parenleft, 3) //
+    ++ tagkeys(x11.XK_parenright, 4) //
+    ++ tagkeys(x11.XK_at, 5) //
+    ++ tagkeys(x11.XK_plus, 6) //
+    ++ tagkeys(x11.XK_minus, 7) //
+    ++ tagkeys(x11.XK_slash, 8);
+
+// ── Click areas ─────────────────────────────────────────────────────────────
+// Identifiers for regions of the bar/screen that can receive mouse clicks.
+// Used by the button bindings below to distinguish where a click occurred.
+pub const ClkTagBar = 0;
+pub const ClkLtSymbol = 1;
+pub const ClkStatusText = 2;
+pub const ClkWinTitle = 3;
+pub const ClkClientWin = 4;
+pub const ClkRootWin = 5;
+pub const ClkLast = 6;
+
+// Mouse button bindings: associate clicks in specific areas with actions.
+pub const buttons = [_]Button{
+    .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button1, .func = &actions.tag, .arg = .{ .i = 0 } },
+    .{ .click = ClkWinTitle, .mask = 0, .button = x11.Button2, .func = &actions.zoom, .arg = .{ .i = 0 } },
+    .{ .click = ClkStatusText, .mask = 0, .button = x11.Button2, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
+    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button1, .func = &actions.moveMouse, .arg = .{ .i = 0 } },
+    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button2, .func = &actions.toggleFloating, .arg = .{ .i = 0 } },
+    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button3, .func = &actions.resizeMouse, .arg = .{ .i = 0 } },
+    .{ .click = ClkTagBar, .mask = 0, .button = x11.Button1, .func = &actions.view, .arg = .{ .i = 0 } },
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -75,7 +191,7 @@ pub fn run() void {
 
 // ── Key/button grabbing ─────────────────────────────────────────────────────
 
-/// Registers all keybindings from config.keys as passive grabs on the root
+/// Registers all keybindings from keys as passive grabs on the root
 /// window. This is how the WM intercepts hotkeys before any client sees them.
 /// Each key is grabbed with all modifier variants (NumLock, CapsLock combos)
 /// so the bindings work regardless of lock-key state.
@@ -84,7 +200,7 @@ pub fn grabkeys() void {
     dwm.updatenumlockmask();
     const modifiers = [_]c_uint{ 0, x11.LockMask, dwm.numlockmask, dwm.numlockmask | x11.LockMask };
     _ = c.XUngrabKey(d, x11.AnyKey, x11.AnyModifier, dwm.root);
-    for (&config.keys) |*key| {
+    for (&keys) |*key| {
         const code = c.XKeysymToKeycode(d, key.keysym);
         if (code != 0) {
             for (modifiers) |mod| {
@@ -98,14 +214,14 @@ pub fn grabkeys() void {
 
 /// X11 ButtonPress event handler. Determines which region of the bar was clicked
 /// (tag label, layout symbol, window title, status text) or whether a client
-/// window was clicked, then dispatches the matching action from config.buttons.
+/// window was clicked, then dispatches the matching action from buttons.
 /// This is how mouse bindings work — clicking a tag switches to it, clicking
 /// the layout symbol cycles layouts, etc.
 fn buttonpress(e: *x11.XEvent) void {
     const d = dwm.dpy orelse return;
     const ev = &e.xbutton;
-    var click: c_uint = config.ClkRootWin;
-    var arg = config.Arg{ .i = 0 };
+    var click: c_uint = ClkRootWin;
+    var arg = Arg{ .i = 0 };
 
     // focus monitor if necessary
     if (monitor.fromWindow(ev.window)) |m| {
@@ -121,32 +237,32 @@ fn buttonpress(e: *x11.XEvent) void {
         var i: usize = 0;
         var x: c_int = 0;
         while (true) {
-            x += bar.textWidth(config.tags[i]);
-            if (ev.x < x or i + 1 >= config.tags.len) break;
+            x += bar.textWidth(bar.tags[i]);
+            if (ev.x < x or i + 1 >= bar.tags.len) break;
             i += 1;
         }
-        if (i < config.tags.len and ev.x < x) {
-            click = config.ClkTagBar;
+        if (i < bar.tags.len and ev.x < x) {
+            click = ClkTagBar;
             arg = .{ .ui = @intCast(i) };
         } else if (ev.x < x + bar.layout_label_width) {
-            click = config.ClkLtSymbol;
+            click = ClkLtSymbol;
         } else if (ev.x > sm.window_w - bar.textWidth(&bar.status_text) - @as(c_int, @intCast(systray.getsystraywidth()))) {
-            click = config.ClkStatusText;
+            click = ClkStatusText;
         } else {
-            click = config.ClkWinTitle;
+            click = ClkWinTitle;
         }
     } else if (dwm.wintoclient(ev.window)) |cl| {
         focus(cl);
         dwm.restack(sm);
         _ = c.XAllowEvents(d, x11.ReplayPointer, x11.CurrentTime);
-        click = config.ClkClientWin;
+        click = ClkClientWin;
     }
 
-    for (&config.buttons) |*btn| {
+    for (&buttons) |*btn| {
         if (click == btn.click and btn.button == ev.button and
             CLEANMASK(btn.mask) == CLEANMASK(ev.state))
         {
-            if (click == config.ClkTagBar and btn.arg.i == 0)
+            if (click == ClkTagBar and btn.arg.i == 0)
                 btn.func(&arg)
             else
                 btn.func(&btn.arg);
@@ -317,13 +433,13 @@ fn expose(e: *x11.XEvent) void {
 }
 
 /// X11 KeyPress event handler. Translates the hardware keycode to a keysym,
-/// then searches config.keys for a matching keysym+modifier combo and calls
+/// then searches keys for a matching keysym+modifier combo and calls
 /// the associated action function.
 fn keypress(e: *x11.XEvent) void {
     const d = dwm.dpy orelse return;
     const ev = &e.xkey;
     const keysym = c.XkbKeycodeToKeysym(d, @intCast(ev.keycode), 0, 0);
-    for (&config.keys) |*key| {
+    for (&keys) |*key| {
         if (keysym == key.keysym and CLEANMASK(key.mod) == CLEANMASK(ev.state)) {
             key.func(&key.arg);
         }

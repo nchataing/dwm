@@ -9,12 +9,17 @@ const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
 const bar = @import("bar.zig");
-const config = @import("config.zig");
 const dwm = @import("dwm.zig");
 const client = @import("client.zig");
 const c = x11.c;
 
 const SizeHints = client.SizeHints;
+
+// ── Systray config ──
+pub const systraypinning: c_uint = 0; // 0: sloppy systray follows selected monitor, >0: pin systray to monitor X
+pub const systrayonleft: bool = false; // false: systray in the right corner, true: systray on left of status text
+pub const systrayspacing: c_uint = 2; // pixel gap between systray icons
+pub const systraypinningfailfirst: bool = true; // if pinning fails, fall back to the first monitor
 
 // XEMBED visibility state for system tray icons.
 pub const EmbedState = enum { inactive, active };
@@ -101,7 +106,7 @@ pub fn wintosystrayicon(w: x11.Window) ?*TrayIcon {
 /// If systraypinning is 0 (the default), the tray follows the selected monitor.
 /// Otherwise it's pinned to a specific monitor index.
 pub fn systraytomon(m: ?*dwm.Monitor) ?*dwm.Monitor {
-    if (config.systraypinning == 0) {
+    if (systraypinning == 0) {
         if (m == null) return dwm.selmon;
         return if (m == dwm.selmon) m else null;
     }
@@ -113,11 +118,11 @@ pub fn systraytomon(m: ?*dwm.Monitor) ?*dwm.Monitor {
     }) {}
     t = dwm.mons;
     var i: c_uint = 1;
-    while (t != null and t.?.next != null and i < config.systraypinning) : ({
+    while (t != null and t.?.next != null and i < systraypinning) : ({
         i += 1;
         t = t.?.next;
     }) {}
-    if (config.systraypinningfailfirst and n < @as(c_int, @intCast(config.systraypinning))) return dwm.mons;
+    if (systraypinningfailfirst and n < @as(c_int, @intCast(systraypinning))) return dwm.mons;
     return t;
 }
 
@@ -129,10 +134,10 @@ pub fn getsystraywidth() c_uint {
         var i = st.icons;
         while (i) |icon| : (i = icon.next) {
             w += @intCast(icon.w);
-            w += config.systrayspacing;
+            w += systrayspacing;
         }
     }
-    return if (w != 0) w + config.systrayspacing else 1;
+    return if (w != 0) w + systrayspacing else 1;
 }
 
 /// Unlinks a systray icon from the icon list and frees its memory.
@@ -155,7 +160,7 @@ pub fn removesystrayicon(i: ?*TrayIcon) void {
 pub fn resizebarwin(m: *dwm.Monitor) void {
     const d = dwm.dpy orelse return;
     var w: c_uint = @intCast(m.window_w);
-    if (systraytomon(m) == m and !config.systrayonleft)
+    if (systraytomon(m) == m and !systrayonleft)
         w -= getsystraywidth();
     _ = c.XMoveResizeWindow(d, m.barwin, m.window_x, m.bar_y, w, @intCast(bar.bar_height));
 }
@@ -243,10 +248,10 @@ pub fn update() void {
 
     const m = systraytomon(null) orelse return;
     var x_pos: c_int = m.monitor_x + m.monitor_w;
-    const status_w = bar.textWidth(&bar.status_text) - bar.text_lr_pad + @as(c_int, @intCast(config.systrayspacing));
+    const status_w = bar.textWidth(&bar.status_text) - bar.text_lr_pad + @as(c_int, @intCast(systrayspacing));
     var w: c_uint = 1;
 
-    if (config.systrayonleft) x_pos -= status_w + @divTrunc(bar.text_lr_pad, 2);
+    if (systrayonleft) x_pos -= status_w + @divTrunc(bar.text_lr_pad, 2);
 
     if (ptr == null) {
         // init systray
@@ -285,13 +290,13 @@ pub fn update() void {
         wa.background_pixel = s[dwm.SchemeNorm][drw.ColBg].pixel;
         _ = c.XChangeWindowAttributes(d, i.window, x11.CWBackPixel, &wa);
         _ = c.XMapRaised(d, i.window);
-        w += config.systrayspacing;
+        w += systrayspacing;
         i.x = @intCast(w);
         _ = c.XMoveResizeWindow(d, i.window, i.x, 0, @intCast(i.w), @intCast(i.h));
         w += @intCast(i.w);
         if (i.monitor != m) i.monitor = m;
     }
-    w = if (w != 0) w + config.systrayspacing else 1;
+    w = if (w != 0) w + systrayspacing else 1;
     x_pos -= @intCast(w);
     _ = c.XMoveResizeWindow(d, st.win, x_pos, m.bar_y, w, @intCast(bar.bar_height));
     var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);

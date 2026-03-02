@@ -10,7 +10,6 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
-const config = @import("config.zig");
 const systray = @import("systray.zig");
 const xerror = @import("xerror.zig");
 const monitor = @import("monitor.zig");
@@ -94,6 +93,19 @@ pub var dmenumon_buf: [2:0]u8 = .{ '0', 0 }; // single-digit monitor number stri
 
 const alloc = std.heap.c_allocator;
 
+// ── Appearance config ───────────────────────────────────────────────────────
+pub const fonts = [_][*:0]const u8{"monospace:size=10"};
+pub const dmenufont: [*:0]const u8 = "monospace:size=10";
+pub const col_gray1: [*:0]const u8 = "#222222";
+pub const col_gray2: [*:0]const u8 = "#444444";
+pub const col_gray3: [*:0]const u8 = "#bbbbbb";
+pub const col_gray4: [*:0]const u8 = "#eeeeee";
+pub const col_cyan: [*:0]const u8 = "#005577";
+pub const colors = [_][3][*:0]const u8{
+    .{ col_gray3, col_gray1, col_gray2 },
+    .{ col_gray4, col_cyan, col_cyan },
+};
+
 // --- Helper functions ---
 // These replace the C preprocessor macros from the original dwm.c.
 // They are kept as UPPERCASE to signal their macro-like origin.
@@ -132,7 +144,7 @@ pub fn checkotherwm() void {
 /// input focus to the root. This ensures a clean handoff if another WM starts.
 pub fn cleanup() void {
     const d = dpy orelse return;
-    const a = config.Arg{ .ui = @as(c_uint, @bitCast(@as(c_int, -1))) };
+    const a = events.Arg{ .ui = @as(c_uint, @bitCast(@as(c_int, -1))) };
     actions.view(&a);
     if (selmon) |sm| sm.layout = &layout.Layout{ .symbol = "", .arrange = null };
     var m = mons;
@@ -403,7 +415,7 @@ pub fn setup() void {
         return;
     };
     const dr = draw.?;
-    if (dr.fontsetCreate(&config.fonts) == null) {
+    if (dr.fontsetCreate(&fonts) == null) {
         die("no fonts could be loaded.");
         return;
     }
@@ -440,10 +452,10 @@ pub fn setup() void {
     cursor[CurMove] = dr.curCreate(x11.XC_fleur) catch null;
 
     // init appearance
-    scheme = alloc.alloc([*]drw.Color, config.colors.len) catch null;
+    scheme = alloc.alloc([*]drw.Color, colors.len) catch null;
     if (scheme) |s| {
-        for (0..config.colors.len) |i| {
-            s[i] = dr.schemeCreate(&config.colors[i]) orelse continue;
+        for (0..colors.len) |i| {
+            s[i] = dr.schemeCreate(&colors[i]) orelse continue;
         }
     }
 

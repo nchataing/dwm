@@ -14,14 +14,15 @@ const xerror = @import("xerror.zig");
 const monitor = @import("monitor.zig");
 const layout = @import("layout.zig");
 const bar = @import("bar.zig");
+const actions = @import("actions.zig");
 const c = x11.c;
 
 pub const VERSION = "6.3";
 
 // --- Cursor indices into the global cursor array ---
 pub const CurNormal = 0; // default pointer (arrow)
-const CurResize = 1; // shown while resizing a window
-const CurMove = 2; // shown while moving a window
+pub const CurResize = 1; // shown while resizing a window
+pub const CurMove = 2; // shown while moving a window
 const CurLast = 3; // total count (used to size the array)
 
 // --- Color scheme indices (into the scheme array) ---
@@ -55,7 +56,7 @@ pub const XLast = 3;
 // --- ICCCM WM atom indices ---
 // Core window manager protocol atoms defined by the ICCCM spec.
 const WMProtocols = 0;
-const WMDelete = 1; // WM_DELETE_WINDOW — ask a client to close gracefully
+pub const WMDelete = 1; // WM_DELETE_WINDOW — ask a client to close gracefully
 const WMState = 2; // WM_STATE — track normal/iconic/withdrawn state
 const WMTakeFocus = 3; // WM_TAKE_FOCUS — give keyboard focus to a client
 const WMLast = 4;
@@ -386,7 +387,7 @@ fn CLEANMASK(mask: c_uint) c_uint {
 }
 
 /// Event mask for grabbing mouse motion (used during move/resize drag operations).
-fn MOUSEMASK() c_long {
+pub fn MOUSEMASK() c_long {
     return BUTTONMASK() | x11.PointerMotionMask;
 }
 
@@ -394,7 +395,7 @@ fn MOUSEMASK() c_long {
 // Maps X11 event type codes to handler functions. The main event loop in run()
 // indexes into this array with the event type to dispatch it.
 const HandlerFn = *const fn (*x11.XEvent) void;
-var handler: [x11.LASTEvent]?HandlerFn = init_handler();
+pub var handler: [x11.LASTEvent]?HandlerFn = init_handler();
 
 fn init_handler() [x11.LASTEvent]?HandlerFn {
     var h = [_]?HandlerFn{null} ** x11.LASTEvent;
@@ -546,7 +547,7 @@ pub fn checkotherwm() void {
 pub fn cleanup() void {
     const d = dpy orelse return;
     const a = config.Arg{ .ui = @as(c_uint, @bitCast(@as(c_int, -1))) };
-    view(&a);
+    actions.view(&a);
     if (selmon) |sm| sm.layout = &layout.Layout{ .symbol = "", .arrange = null };
     var m = mons;
     while (m) |mon| : (m = mon.next) {
@@ -739,7 +740,7 @@ fn expose(e: *x11.XEvent) void {
 /// focused, normal for unfocused), sets X input focus, and updates _NET_ACTIVE_WINDOW.
 /// If the requested client is not visible, it falls back to the first visible
 /// client in the focus stack.
-fn focus(cl: ?*Client) void {
+pub fn focus(cl: ?*Client) void {
     const d = dpy orelse return;
     const s = scheme orelse return;
     var c_focus = cl;
@@ -779,59 +780,6 @@ fn focusin(e: *x11.XEvent) void {
         if (sm.sel) |sel| {
             if (ev.window != sel.window) setfocus(sel);
         }
-    }
-}
-
-/// Keybinding action: switches focus to the next/previous monitor.
-/// Unfocuses the current selection first so the border color updates correctly.
-pub fn focusmon(arg: *const config.Arg) void {
-    if (mons == null or mons.?.next == null) return;
-    const m = monitor.adjacent(arg.i) orelse return;
-    if (m == selmon) return;
-    if (selmon) |sm| unfocus(sm.sel, false);
-    selmon = m;
-    focus(null);
-}
-
-/// Keybinding action: cycles focus to the next (arg.i > 0) or previous
-/// (arg.i < 0) visible client in the tiling order. Wraps around at the
-/// ends of the client list. Respects lockfullscreen — if the focused
-/// client is fullscreen, focus stays put to prevent accidental switches.
-pub fn focusstack(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const sel = sm.sel orelse return;
-    if (sel.isfullscreen and config.lockfullscreen) return;
-
-    var found: ?*Client = null;
-    if (arg.i > 0) {
-        found = sel.next;
-        while (found) |f| {
-            if (f.isVisible()) break;
-            found = f.next;
-        }
-        if (found == null) {
-            found = sm.clients;
-            while (found) |f| {
-                if (f.isVisible()) break;
-                found = f.next;
-            }
-        }
-    } else {
-        var i = sm.clients;
-        while (i != null and i != sm.sel) {
-            if (i.?.isVisible()) found = i;
-            i = i.?.next;
-        }
-        if (found == null) {
-            while (i != null) {
-                if (i.?.isVisible()) found = i;
-                i = i.?.next;
-            }
-        }
-    }
-    if (found) |f| {
-        focus(f);
-        restack(sm);
     }
 }
 
@@ -976,26 +924,6 @@ fn keypress(e: *x11.XEvent) void {
     }
 }
 
-/// Keybinding action: gracefully closes the focused window. First tries
-/// WM_DELETE_WINDOW (the polite ICCCM way that lets the app save state);
-/// if the client doesn't support that protocol, forcefully kills it with
-/// XKillClient as a last resort.
-pub fn killclient(_: *const config.Arg) void {
-    const d = dpy orelse return;
-    const sm = selmon orelse return;
-    const sel = sm.sel orelse return;
-
-    if (!sendevent(sel.window, wmatom[WMDelete], x11.NoEventMask, @intCast(wmatom[WMDelete]), x11.CurrentTime, 0, 0, 0)) {
-        _ = c.XGrabServer(d);
-        _ = c.XSetErrorHandler(&xerror.dummy);
-        _ = c.XSetCloseDownMode(d, x11.DestroyAll);
-        _ = c.XKillClient(d, sel.window);
-        _ = c.XSync(d, x11.False);
-        _ = c.XSetErrorHandler(&xerror.handler);
-        _ = c.XUngrabServer(d);
-    }
-}
-
 /// Takes ownership of a new window: creates a Client, reads its properties
 /// (title, size hints, transient-for, window type), applies rules, sets the
 /// border, subscribes to events, and inserts it into the appropriate monitor's
@@ -1125,73 +1053,10 @@ fn motionnotify(e: *x11.XEvent) void {
     S.mon = m;
 }
 
-/// Keybinding action: interactive window move via mouse drag. Grabs the pointer,
-/// enters a local event loop tracking mouse motion, and moves the window in
-/// real-time. Snaps to monitor edges when within `config.snap` pixels. If the
-/// window was tiled, dragging it beyond the snap threshold auto-floats it.
-/// On release, if the window landed on a different monitor, it's sent there.
-pub fn movemouse(_: *const config.Arg) void {
-    const d = dpy orelse return;
-    const sm = selmon orelse return;
-    const cl = sm.sel orelse return;
-    if (cl.isfullscreen) return;
-    restack(sm);
-    const ocx = cl.x;
-    const ocy = cl.y;
-    if (c.XGrabPointer(d, root, x11.False, @intCast(MOUSEMASK()), x11.GrabModeAsync, x11.GrabModeAsync, x11.None, cursor[CurMove].?.cursor, x11.CurrentTime) != x11.GrabSuccess)
-        return;
-    var x: c_int = 0;
-    var y: c_int = 0;
-    if (!getrootptr(&x, &y)) return;
-    var lasttime: x11.Time = 0;
-    var ev: x11.XEvent = undefined;
-    while (true) {
-        _ = c.XMaskEvent(d, @intCast(MOUSEMASK() | x11.ExposureMask | x11.SubstructureRedirectMask), &ev);
-        switch (ev.type) {
-            x11.ConfigureRequest, x11.Expose, x11.MapRequest => {
-                if (handler[@intCast(ev.type)]) |h| h(&ev);
-            },
-            x11.MotionNotify => {
-                if ((ev.xmotion.time - lasttime) <= (1000 / 60)) continue;
-                lasttime = ev.xmotion.time;
-                var nx = ocx + (ev.xmotion.x - x);
-                var ny = ocy + (ev.xmotion.y - y);
-                if (@abs(sm.window_x - nx) < config.snap) {
-                    nx = sm.window_x;
-                } else if (@abs((sm.window_x + sm.window_w) - (nx + cl.getWidth())) < config.snap) {
-                    nx = sm.window_x + sm.window_w - cl.getWidth();
-                }
-                if (@abs(sm.window_y - ny) < config.snap) {
-                    ny = sm.window_y;
-                } else if (@abs((sm.window_y + sm.window_h) - (ny + cl.getHeight())) < config.snap) {
-                    ny = sm.window_y + sm.window_h - cl.getHeight();
-                }
-                if (!cl.isfloating and sm.layout.arrange != null and
-                    (@abs(nx - cl.x) > @as(c_int, config.snap) or @abs(ny - cl.y) > @as(c_int, config.snap)))
-                {
-                    togglefloating(&config.Arg{ .i = 0 });
-                }
-                if (sm.layout.arrange == null or cl.isfloating)
-                    resize(cl, nx, ny, cl.w, cl.h, true);
-            },
-            x11.ButtonRelease => break,
-            else => {},
-        }
-    }
-    _ = c.XUngrabPointer(d, x11.CurrentTime);
-    if (monitor.fromRect(cl.x, cl.y, cl.w, cl.h)) |m| {
-        if (m != selmon) {
-            sendmon(cl, m);
-            selmon = m;
-            focus(null);
-        }
-    }
-}
-
 /// Moves a client to the head of the client list (making it the new master
 /// in tiled layout), focuses it, and re-arranges. Used by zoom() to promote
 /// a window to the master area.
-fn pop(cl: *Client) void {
+pub fn pop(cl: *Client) void {
     cl.detach();
     cl.attach();
     focus(cl);
@@ -1248,12 +1113,6 @@ fn propertynotify(e: *x11.XEvent) void {
     }
 }
 
-/// Keybinding action: sets running to false, which exits the main event loop
-/// and triggers cleanup. This is the "quit dwm" action.
-pub fn quit(_: *const config.Arg) void {
-    running = false;
-}
-
 /// High-level resize: applies size hints to the requested geometry, then calls
 /// resizeclient only if the geometry actually changed. This avoids unnecessary
 /// X server round-trips when the layout re-arranges but nothing actually moved.
@@ -1288,63 +1147,6 @@ fn resizeclient(cl: *Client, x: c_int, y: c_int, w: c_int, h: c_int) void {
     _ = c.XConfigureWindow(d, cl.window, x11.CWX | x11.CWY | x11.CWWidth | x11.CWHeight | x11.CWBorderWidth, &wc);
     cl.sendConfigure();
     _ = c.XSync(d, x11.False);
-}
-
-/// Keybinding action: interactive window resize via mouse drag. Similar to
-/// movemouse but warps the cursor to the bottom-right corner and tracks
-/// the delta as new width/height. Auto-floats tiled windows when dragged
-/// beyond the snap threshold. On release, sends the window to whichever
-/// monitor it overlaps most.
-pub fn resizemouse(_: *const config.Arg) void {
-    const d = dpy orelse return;
-    const sm = selmon orelse return;
-    const cl = sm.sel orelse return;
-    if (cl.isfullscreen) return;
-    restack(sm);
-    const ocx = cl.x;
-    const ocy = cl.y;
-    if (c.XGrabPointer(d, root, x11.False, @intCast(MOUSEMASK()), x11.GrabModeAsync, x11.GrabModeAsync, x11.None, cursor[CurResize].?.cursor, x11.CurrentTime) != x11.GrabSuccess)
-        return;
-    _ = c.XWarpPointer(d, x11.None, cl.window, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
-    var lasttime: x11.Time = 0;
-    var ev: x11.XEvent = undefined;
-    while (true) {
-        _ = c.XMaskEvent(d, @intCast(MOUSEMASK() | x11.ExposureMask | x11.SubstructureRedirectMask), &ev);
-        switch (ev.type) {
-            x11.ConfigureRequest, x11.Expose, x11.MapRequest => {
-                if (handler[@intCast(ev.type)]) |h| h(&ev);
-            },
-            x11.MotionNotify => {
-                if ((ev.xmotion.time - lasttime) <= (1000 / 60)) continue;
-                lasttime = ev.xmotion.time;
-                const nw = @max(ev.xmotion.x - ocx - 2 * cl.border_width + 1, 1);
-                const nh = @max(ev.xmotion.y - ocy - 2 * cl.border_width + 1, 1);
-                if (cl.monitor.?.window_x + nw >= sm.window_x and cl.monitor.?.window_x + nw <= sm.window_x + sm.window_w and
-                    cl.monitor.?.window_y + nh >= sm.window_y and cl.monitor.?.window_y + nh <= sm.window_y + sm.window_h)
-                {
-                    if (!cl.isfloating and sm.layout.arrange != null and
-                        (@abs(nw - cl.w) > @as(c_int, config.snap) or @abs(nh - cl.h) > @as(c_int, config.snap)))
-                    {
-                        togglefloating(&config.Arg{ .i = 0 });
-                    }
-                }
-                if (sm.layout.arrange == null or cl.isfloating)
-                    resize(cl, cl.x, cl.y, nw, nh, true);
-            },
-            x11.ButtonRelease => break,
-            else => {},
-        }
-    }
-    _ = c.XWarpPointer(d, x11.None, cl.window, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
-    _ = c.XUngrabPointer(d, x11.CurrentTime);
-    while (c.XCheckMaskEvent(d, x11.EnterWindowMask, &ev) != 0) {}
-    if (monitor.fromRect(cl.x, cl.y, cl.w, cl.h)) |m| {
-        if (m != selmon) {
-            sendmon(cl, m);
-            selmon = m;
-            focus(null);
-        }
-    }
 }
 
 /// Handles ResizeRequest events from systray icons. The tray icons can't resize
@@ -1436,7 +1238,7 @@ pub fn scan() void {
 /// Transfers a client from its current monitor to a different one. Updates the
 /// client's tags to match the destination monitor's active tags so it becomes
 /// immediately visible there. Re-arranges both monitors.
-fn sendmon(cl: *Client, m: *Monitor) void {
+pub fn sendmon(cl: *Client, m: *Monitor) void {
     if (cl.monitor == m) return;
     unfocus(cl, true);
     cl.detach();
@@ -1532,34 +1334,6 @@ fn setfullscreen(cl: *Client, fullscreen: bool) void {
         resizeclient(cl, cl.x, cl.y, cl.w, cl.h);
         layout.arrange(cl.monitor);
     }
-}
-
-/// Keybinding action: switches the active layout to the one specified by arg.v.
-pub fn setlayout(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    if (arg.v) |v| {
-        sm.layout = @ptrCast(@alignCast(v));
-    }
-    const sym = std.mem.span(sm.layout.symbol);
-    @memcpy(sm.layout_symbol[0..sym.len], sym);
-    if (sym.len < sm.layout_symbol.len) sm.layout_symbol[sym.len] = 0;
-    if (sm.sel != null) {
-        layout.arrange(sm);
-    } else {
-        bar.drawbar(sm);
-    }
-}
-
-/// Keybinding action: adjusts the master area size ratio. If arg.f < 1.0, it's
-/// treated as a relative delta added to the current factor; if >= 1.0, it's an
-/// absolute value (minus 1.0). Clamped to [0.05, 0.95] so neither area disappears.
-pub fn setmfact(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    if (sm.layout.arrange == null) return;
-    const f = if (arg.f < 1.0) arg.f + sm.master_factor else arg.f - 1.0;
-    if (f < 0.05 or f > 0.95) return;
-    sm.master_factor = f;
-    layout.arrange(sm);
 }
 
 /// One-time initialization of the entire WM. Sets up the X connection, creates
@@ -1670,101 +1444,11 @@ fn sigchld(_: std.os.linux.SIG) callconv(.c) void {
     }
 }
 
-/// Keybinding action: forks and execs an external command (e.g. terminal,
-/// dmenu). The child closes the X display fd (inherited from parent) and
-/// starts a new session so it's not tied to dwm's process group. If the
-/// command is dmenu, the monitor number is patched into the argv so dmenu
-/// appears on the correct screen.
-pub fn spawn(arg: *const config.Arg) void {
-    const d = dpy orelse return;
-    const v = arg.v orelse return;
-    const argv: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(v));
-
-    // Update dmenumon if this is the dmenu command
-    if (argv == @as([*:null]const ?[*:0]const u8, @ptrCast(&config.dmenucmd))) {
-        if (selmon) |sm| {
-            dmenumon_buf[0] = '0' + @as(u8, @intCast(sm.num));
-        }
-    }
-
-    const pid = std.c.fork();
-    if (pid == 0) {
-        // child
-        if (dpy) |dp| {
-            std.posix.close(@intCast(c.ConnectionNumber(dp)));
-        }
-        _ = std.c.setsid();
-        const argv_c: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(v));
-        _ = c.execvp(argv_c[0].?, @ptrCast(argv_c));
-        std.debug.print("dwm: execvp failed\n", .{});
-        std.process.exit(0);
-    } else if (pid < 0) {
-        return;
-    }
-    _ = d;
-}
-
-/// Keybinding action: moves the focused window to the tag specified in arg.ui.
-/// The window disappears from the current view if the target tag isn't the active one.
-pub fn tag(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const sel = sm.sel orelse return;
-    const new_tag: u5 = @intCast(arg.ui);
-    sel.tag = new_tag;
-    focus(null);
-    layout.arrange(sm);
-}
-
-/// Keybinding action: sends the focused window to the next/previous monitor.
-/// The window gets the destination monitor's active tags so it's visible there.
-pub fn tagmon(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const sel = sm.sel orelse return;
-    _ = sel;
-    if (mons == null or mons.?.next == null) return;
-    if (monitor.adjacent(arg.i)) |m| sendmon(sm.sel.?, m);
-}
-
-/// Keybinding action: shows or hides the status bar. Updates the bar position,
-/// resizes the bar window (and systray if present), and re-arranges so tiled
-/// windows expand into the freed space (or shrink to make room for the bar).
-pub fn togglebar(_: *const config.Arg) void {
-    const d = dpy orelse return;
-    const sm = selmon orelse return;
-    sm.showbar = !sm.showbar;
-    sm.updateBarPos();
-    systray.resizebarwin(sm);
-    if (systray.ptr) |st| {
-        var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
-        if (!sm.showbar) {
-            wc.y = -bar.bar_height;
-        } else {
-            wc.y = 0;
-            if (!sm.topbar) wc.y = sm.monitor_h - bar.bar_height;
-        }
-        _ = c.XConfigureWindow(d, st.win, x11.CWY, &wc);
-    }
-    layout.arrange(sm);
-}
-
-/// Keybinding action: toggles the focused window between floating and tiled.
-/// Fixed-size windows (equal min and max hints) are always forced to floating.
-/// Blocked while fullscreen to prevent layout corruption.
-pub fn togglefloating(_: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const sel = sm.sel orelse return;
-    if (sel.isfullscreen) return;
-    sel.isfloating = !sel.isfloating or sel.isfixed;
-    if (sel.isfloating)
-        resize(sel, sel.x, sel.y, sel.w, sel.h, false);
-    layout.arrange(sm);
-}
-
 /// Keybinding action: XORs the focused window's tag bitmask with the given tag.
 /// Removes focus decorations from a client: resets the border color to normal
 /// and re-grabs all buttons (so clicking it will re-focus). Optionally clears
 /// X input focus to root. Called before focusing a different client.
-fn unfocus(cl: ?*Client, set_focus: bool) void {
+pub fn unfocus(cl: ?*Client, set_focus: bool) void {
     const d = dpy orelse return;
     const s = scheme orelse return;
     const cl_c = cl orelse return;
@@ -1901,16 +1585,6 @@ fn updatewmhints(cl: *Client) void {
     _ = c.XFree(wmh);
 }
 
-/// Keybinding action: switches the monitor's view to the tag in arg.ui.
-pub fn view(arg: *const config.Arg) void {
-    const sm = selmon orelse return;
-    const new_tag: u5 = @intCast(arg.ui);
-    if (new_tag == sm.tag) return;
-    sm.tag = new_tag;
-    focus(null);
-    layout.arrange(sm);
-}
-
 /// Looks up a Client by its X window ID across all monitors. Returns null if
 /// the window isn't managed (e.g. it's a bar, root, or unmanaged window).
 pub fn wintoclient(w: x11.Window) ?*Client {
@@ -1922,56 +1596,6 @@ pub fn wintoclient(w: x11.Window) ?*Client {
         }
     }
     return null;
-}
-
-/// Keybinding action: promotes the focused window to the master area. If it's
-/// already the master (first tiled client), promotes the second tiled client
-/// instead — effectively swapping master and top-of-stack. No-op for floating
-/// clients or layouts without a master area.
-pub fn zoom(_: *const config.Arg) void {
-    const sm = selmon orelse return;
-    var cl = sm.sel orelse return;
-    if (sm.layout.arrange == null or (sm.sel != null and sm.sel.?.isfloating)) return;
-    if (cl == layout.nextTiled(sm.clients)) {
-        cl = layout.nextTiled(cl.next) orelse return;
-    }
-    pop(cl);
-}
-
-// Custom functions
-
-/// Synthesizes a key press+release event and sends it to the window under the
-/// pointer. Used by f1switchfocus to inject an F1 keypress into the focused
-/// app before switching focus (e.g. to trigger a specific action in the app).
-pub fn fakekeypress(keysym: x11.KeySym) void {
-    const d = dpy orelse return;
-    var event: x11.XEvent = std.mem.zeroes(x11.XEvent);
-    event.xkey.keycode = c.XKeysymToKeycode(d, keysym);
-    event.xkey.same_screen = x11.True;
-    event.xkey.subwindow = root;
-    while (event.xkey.subwindow != 0) {
-        event.xkey.window = event.xkey.subwindow;
-        _ = c.XQueryPointer(d, event.xkey.window, &event.xkey.root, &event.xkey.subwindow, &event.xkey.x_root, &event.xkey.y_root, &event.xkey.x, &event.xkey.y, &event.xkey.state);
-    }
-    event.type = x11.KeyPress;
-    _ = c.XSendEvent(d, x11.PointerWindow, x11.True, x11.KeyPressMask, &event);
-    _ = c.XFlush(d);
-    _ = c.usleep(1000); // 1 millisecond
-    event.type = x11.KeyRelease;
-    _ = c.XSendEvent(d, x11.PointerWindow, x11.True, x11.ButtonReleaseMask, &event);
-    _ = c.XFlush(d);
-    _ = c.usleep(1000);
-}
-
-/// Custom keybinding action: sends an F1 keypress to the current window, waits
-/// briefly for it to process, then moves focus to the next window in the stack.
-/// This is a user-specific workflow shortcut (e.g. triggering help/action in one
-/// app then switching to another).
-pub fn f1switchfocus(_: *const config.Arg) void {
-    fakekeypress(x11.XK_F1);
-    _ = c.usleep(10 * 1000); // 10ms
-    const arg = config.Arg{ .i = 1 };
-    focusstack(&arg);
 }
 
 /// Prints an error message and exits immediately. Used for unrecoverable

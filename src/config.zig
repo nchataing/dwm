@@ -3,6 +3,7 @@
 /// After changes, rebuild with `zig build` and restart dwm (Mod+Shift+E).
 const x11 = @import("x11.zig");
 const dwm = @import("dwm.zig");
+const actions = @import("actions.zig");
 const layout = @import("layout.zig");
 
 // ── Appearance ──────────────────────────────────────────────────────────────
@@ -115,37 +116,45 @@ pub const screenswitchcmd = [_:null]?[*:0]const u8{ "/home/nchataing/perso/utils
 ///   Mod+Shift+key → tag client        (move focused client to that tag)
 fn tagkeys(comptime key: x11.KeySym, comptime tag_idx: u5) [2]Key {
     return .{
-        .{ .mod = MODKEY, .keysym = key, .func = &dwm.view, .arg = .{ .ui = tag_idx } },
-        .{ .mod = MODKEY | x11.ShiftMask, .keysym = key, .func = &dwm.tag, .arg = .{ .ui = tag_idx } },
+        .{ .mod = MODKEY, .keysym = key, .func = &actions.view, .arg = .{ .ui = tag_idx } },
+        .{ .mod = MODKEY | x11.ShiftMask, .keysym = key, .func = &actions.tag, .arg = .{ .ui = tag_idx } },
     };
 }
 
 // Keybindings. Keys are for a BEPO keyboard layout — the number row produces
 // «»()@+−/ rather than 1-9, so tagkeys use those keysyms instead of XK_1..XK_9.
 pub const keys = [_]Key{
-    .{ .mod = MODKEY, .keysym = x11.XK_p, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&dmenucmd) } },
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_Return, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_s, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&screenswitchcmd) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_b, .func = &dwm.togglebar, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_j, .func = &dwm.focusstack, .arg = .{ .i = 1 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_k, .func = &dwm.focusstack, .arg = .{ .i = -1 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_Tab, .func = &dwm.focusstack, .arg = .{ .i = 1 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_h, .func = &dwm.setmfact, .arg = .{ .f = -0.05 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_l, .func = &dwm.setmfact, .arg = .{ .f = 0.05 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_Return, .func = &dwm.zoom, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_q, .func = &dwm.killclient, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_t, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layout.layouts[0]) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_f, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layout.layouts[1]) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_m, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layout.layouts[2]) } },
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_space, .func = &dwm.togglefloating, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_comma, .func = &dwm.focusmon, .arg = .{ .i = -1 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_period, .func = &dwm.focusmon, .arg = .{ .i = 1 } },
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_comma, .func = &dwm.tagmon, .arg = .{ .i = -1 } },
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_period, .func = &dwm.tagmon, .arg = .{ .i = 1 } },
-} ++ tagkeys(x11.XK_quotedbl, 0) ++ tagkeys(x11.XK_guillemotleft, 1) ++ tagkeys(x11.XK_guillemotright, 2) ++ tagkeys(x11.XK_parenleft, 3) ++ tagkeys(x11.XK_parenright, 4) ++ tagkeys(x11.XK_at, 5) ++ tagkeys(x11.XK_plus, 6) ++ tagkeys(x11.XK_minus, 7) ++ tagkeys(x11.XK_slash, 8) ++ [_]Key{
-    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_e, .func = &dwm.quit, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_F1, .func = &dwm.f1switchfocus, .arg = .{ .i = 0 } },
-};
+    .{ .mod = MODKEY, .keysym = x11.XK_p, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&dmenucmd) } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_Return, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_s, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&screenswitchcmd) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_b, .func = &actions.toggleBar, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_j, .func = &actions.focusStack, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_k, .func = &actions.focusStack, .arg = .{ .i = -1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_Tab, .func = &actions.focusStack, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_h, .func = &actions.setMasterFactor, .arg = .{ .f = -0.05 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_l, .func = &actions.setMasterFactor, .arg = .{ .f = 0.05 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_Return, .func = &actions.zoom, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_q, .func = &actions.killClient, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_t, .func = &actions.setLayout, .arg = .{ .v = @ptrCast(&layout.layouts[0]) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_f, .func = &actions.setLayout, .arg = .{ .v = @ptrCast(&layout.layouts[1]) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_m, .func = &actions.setLayout, .arg = .{ .v = @ptrCast(&layout.layouts[2]) } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_space, .func = &actions.toggleFloating, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_comma, .func = &actions.focusMonitor, .arg = .{ .i = -1 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_period, .func = &actions.focusMonitor, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_comma, .func = &actions.tagMonitor, .arg = .{ .i = -1 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_period, .func = &actions.tagMonitor, .arg = .{ .i = 1 } },
+    .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_e, .func = &actions.quit, .arg = .{ .i = 0 } },
+    .{ .mod = MODKEY, .keysym = x11.XK_F1, .func = &actions.f1SwitchFocus, .arg = .{ .i = 0 } },
+} //
+    ++ tagkeys(x11.XK_quotedbl, 0) //
+    ++ tagkeys(x11.XK_guillemotleft, 1) //
+    ++ tagkeys(x11.XK_guillemotright, 2) //
+    ++ tagkeys(x11.XK_parenleft, 3) //
+    ++ tagkeys(x11.XK_parenright, 4) //
+    ++ tagkeys(x11.XK_at, 5) //
+    ++ tagkeys(x11.XK_plus, 6) //
+    ++ tagkeys(x11.XK_minus, 7) //
+    ++ tagkeys(x11.XK_slash, 8);
 
 // ── Click areas ─────────────────────────────────────────────────────────────
 // Identifiers for regions of the bar/screen that can receive mouse clicks.
@@ -160,11 +169,11 @@ pub const ClkLast = 6;
 
 // Mouse button bindings: associate clicks in specific areas with actions.
 pub const buttons = [_]Button{
-    .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button1, .func = &dwm.tag, .arg = .{ .i = 0 } },
-    .{ .click = ClkWinTitle, .mask = 0, .button = x11.Button2, .func = &dwm.zoom, .arg = .{ .i = 0 } },
-    .{ .click = ClkStatusText, .mask = 0, .button = x11.Button2, .func = &dwm.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
-    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button1, .func = &dwm.movemouse, .arg = .{ .i = 0 } },
-    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button2, .func = &dwm.togglefloating, .arg = .{ .i = 0 } },
-    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button3, .func = &dwm.resizemouse, .arg = .{ .i = 0 } },
-    .{ .click = ClkTagBar, .mask = 0, .button = x11.Button1, .func = &dwm.view, .arg = .{ .i = 0 } },
+    .{ .click = ClkTagBar, .mask = MODKEY, .button = x11.Button1, .func = &actions.tag, .arg = .{ .i = 0 } },
+    .{ .click = ClkWinTitle, .mask = 0, .button = x11.Button2, .func = &actions.zoom, .arg = .{ .i = 0 } },
+    .{ .click = ClkStatusText, .mask = 0, .button = x11.Button2, .func = &actions.spawn, .arg = .{ .v = @ptrCast(&termcmd) } },
+    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button1, .func = &actions.moveMouse, .arg = .{ .i = 0 } },
+    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button2, .func = &actions.toggleFloating, .arg = .{ .i = 0 } },
+    .{ .click = ClkClientWin, .mask = MODKEY, .button = x11.Button3, .func = &actions.resizeMouse, .arg = .{ .i = 0 } },
+    .{ .click = ClkTagBar, .mask = 0, .button = x11.Button1, .func = &actions.view, .arg = .{ .i = 0 } },
 };

@@ -9,20 +9,10 @@ const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
 const config = @import("config.zig");
+const systray = @import("systray.zig");
 const c = x11.c;
 
 const VERSION = "6.3";
-
-// --- XEMBED protocol constants (see freedesktop XEMBED spec) ---
-// These are used by the system tray to embed applet windows into the bar.
-const SYSTEM_TRAY_REQUEST_DOCK = 0;
-const XEMBED_EMBEDDED_NOTIFY = 0;
-const XEMBED_WINDOW_ACTIVATE = 1;
-const XEMBED_WINDOW_DEACTIVATE = 2;
-const XEMBED_FOCUS_IN = 4;
-const XEMBED_MODALITY_ON = 10;
-const XEMBED_MAPPED = (1 << 0);
-const XEMBED_EMBEDDED_VERSION = 0;
 
 // --- Cursor indices into the global cursor array ---
 const CurNormal = 0; // default pointer (arrow)
@@ -37,26 +27,26 @@ pub const SchemeSel = 1; // focused / selected window
 // --- EWMH (_NET_*) atom indices ---
 // These atoms let other programs (panels, pagers, taskbars) communicate
 // with the window manager via the Extended Window Manager Hints protocol.
-const NetSupported = 0;
-const NetWMName = 1;
-const NetWMState = 2;
-const NetWMCheck = 3;
-const NetSystemTray = 4;
-const NetSystemTrayOP = 5;
-const NetSystemTrayOrientation = 6;
-const NetSystemTrayOrientationHorz = 7;
-const NetWMFullscreen = 8;
-const NetActiveWindow = 9;
-const NetWMWindowType = 10;
-const NetWMWindowTypeDialog = 11;
-const NetClientList = 12;
-const NetLast = 13;
+pub const NetSupported = 0;
+pub const NetWMName = 1;
+pub const NetWMState = 2;
+pub const NetWMCheck = 3;
+pub const NetSystemTray = 4;
+pub const NetSystemTrayOP = 5;
+pub const NetSystemTrayOrientation = 6;
+pub const NetSystemTrayOrientationHorz = 7;
+pub const NetWMFullscreen = 8;
+pub const NetActiveWindow = 9;
+pub const NetWMWindowType = 10;
+pub const NetWMWindowTypeDialog = 11;
+pub const NetClientList = 12;
+pub const NetLast = 13;
 
 // --- XEMBED atom indices (used for system tray embedding) ---
-const XembedManager = 0;
-const XembedAtom = 1;
-const XembedInfo = 2;
-const XLast = 3;
+pub const XembedManager = 0;
+pub const XembedAtom = 1;
+pub const XembedInfo = 2;
+pub const XLast = 3;
 
 // --- ICCCM WM atom indices ---
 // Core window manager protocol atoms defined by the ICCCM spec.
@@ -109,8 +99,238 @@ pub const Client = struct {
 
     next: ?*Client = null, // next in the per-monitor client list (creation order)
     snext: ?*Client = null, // next in the per-monitor focus stack (most-recently-focused order)
-    mon: ?*Monitor = null, // the monitor this client belongs to
-    win: x11.Window = 0, // the underlying X11 window id
+    monitor: ?*Monitor = null, // the monitor this client belongs to
+    window: x11.Window = 0, // the underlying X11 window id
+
+    // --- Methods ---
+
+    /// A client is visible if any of its tags overlap with the monitor's active tagset.
+    pub fn isVisible(self: *Client) bool {
+        const m = self.monitor orelse return false;
+        return (self.tags & m.tagset[m.selected_tags]) != 0;
+    }
+
+    /// Total width of a client window including its borders on both sides.
+    pub fn getWidth(self: *Client) c_int {
+        return self.w + 2 * self.border_width;
+    }
+
+    /// Total height of a client window including its borders on top and bottom.
+    pub fn getHeight(self: *Client) c_int {
+        return self.h + 2 * self.border_width;
+    }
+
+    /// Inserts this client at the head of its monitor's client list.
+    /// New windows appear at the top of the master area because dwm uses a
+    /// stack-like insertion order — the most recently attached client tiles first.
+    pub fn attach(self: *Client) void {
+        const m = self.monitor orelse return;
+        self.next = m.clients;
+        m.clients = self;
+    }
+
+    /// Inserts this client at the head of its monitor's focus-order stack.
+    /// The stack list is separate from the client list and tracks focus history —
+    /// the most recently focused client is always first, which determines what
+    /// gets focused when the current selection is closed.
+    pub fn attachStack(self: *Client) void {
+        const m = self.monitor orelse return;
+        self.snext = m.stack;
+        m.stack = self;
+    }
+
+    /// Removes this client from its monitor's tiling-order client list.
+    /// Used before re-attaching to a different position, or before destroying the client.
+    pub fn detach(self: *Client) void {
+        const m = self.monitor orelse return;
+        var tc: *?*Client = &m.clients;
+        while (tc.* != null) {
+            if (tc.* == self) {
+                tc.* = self.next;
+                return;
+            }
+            tc = &tc.*.?.next;
+        }
+    }
+
+    /// Removes this client from its monitor's focus-order stack. If this client
+    /// was the selected one, picks the next visible client in focus order as the
+    /// new selection — this is how focus "falls through" when a window is closed.
+    pub fn detachStack(self: *Client) void {
+        const m = self.monitor orelse return;
+        var tc: *?*Client = &m.stack;
+        while (tc.* != null) {
+            if (tc.* == self) {
+                tc.* = self.snext;
+                break;
+            }
+            tc = &tc.*.?.snext;
+        }
+
+        if (self == m.sel) {
+            var t = m.stack;
+            while (t) |tt| : (t = tt.snext) {
+                if (tt.isVisible()) break;
+            }
+            m.sel = t;
+        }
+    }
+
+    /// Sends a synthetic ConfigureNotify event to this client, informing it of its
+    /// current geometry. Required by ICCCM after we change a window's size/position
+    /// so the client knows where it actually ended up (the WM may have adjusted
+    /// what the client requested).
+    pub fn sendConfigure(self: *Client) void {
+        const d = dpy orelse return;
+        var ce: x11.XConfigureEvent = std.mem.zeroes(x11.XConfigureEvent);
+        ce.type = x11.ConfigureNotify;
+        ce.display = d;
+        ce.event = self.window;
+        ce.window = self.window;
+        ce.x = self.x;
+        ce.y = self.y;
+        ce.width = self.w;
+        ce.height = self.h;
+        ce.border_width = self.border_width;
+        ce.above = x11.None;
+        ce.override_redirect = x11.False;
+        _ = c.XSendEvent(d, self.window, x11.False, x11.StructureNotifyMask, @ptrCast(&ce));
+    }
+
+    /// Sets the WM_STATE property on this client window (NormalState, IconicState, or
+    /// WithdrawnState). Required by ICCCM so pagers and session managers can query
+    /// window state.
+    pub fn setClientState(self: *Client, state: c_long) void {
+        const d = dpy orelse return;
+        const data = [2]c_long{ state, x11.None };
+        _ = c.XChangeProperty(d, self.window, wmatom[WMState], wmatom[WMState], 32, x11.PropModeReplace, @ptrCast(&data), 2);
+    }
+
+    /// Sets or clears the urgency flag on this client and updates the X11 WM_HINTS
+    /// accordingly. Urgent windows get highlighted in the bar's tag indicators
+    /// so the user notices they need attention.
+    pub fn setUrgent(self: *Client, urg: bool) void {
+        const d = dpy orelse return;
+        self.isurgent = urg;
+        const wmh = c.XGetWMHints(d, self.window) orelse return;
+        if (urg) {
+            wmh.*.flags |= x11.XUrgencyHint;
+        } else {
+            wmh.*.flags &= ~@as(c_long, x11.XUrgencyHint);
+        }
+        _ = c.XSetWMHints(d, self.window, wmh);
+        _ = c.XFree(wmh);
+    }
+
+    /// Constrains proposed geometry (x, y, w, h) to ICCCM size hints. Returns true
+    /// if the result differs from the client's current geometry. When interact is true
+    /// (user-driven resize), clamps to screen; otherwise clamps to monitor work area.
+    pub fn applySizeHints(self: *Client, x: *c_int, y: *c_int, w: *c_int, h: *c_int, interact: bool) bool {
+        const m = self.monitor orelse return false;
+
+        // set minimum possible
+        w.* = @max(1, w.*);
+        h.* = @max(1, h.*);
+        if (interact) {
+            if (x.* > screen_width) x.* = screen_width - self.getWidth();
+            if (y.* > screen_height) y.* = screen_height - self.getHeight();
+            if (x.* + w.* + 2 * self.border_width < 0) x.* = 0;
+            if (y.* + h.* + 2 * self.border_width < 0) y.* = 0;
+        } else {
+            if (x.* >= m.window_x + m.window_w) x.* = m.window_x + m.window_w - self.getWidth();
+            if (y.* >= m.window_y + m.window_h) y.* = m.window_y + m.window_h - self.getHeight();
+            if (x.* + w.* + 2 * self.border_width <= m.window_x) x.* = m.window_x;
+            if (y.* + h.* + 2 * self.border_width <= m.window_y) y.* = m.window_y;
+        }
+        if (h.* < bar_height) h.* = bar_height;
+        if (w.* < bar_height) w.* = bar_height;
+
+        if (config.resizehints or self.isfloating or (self.monitor != null and self.monitor.?.lt[self.monitor.?.selected_layout].arrange == null)) {
+            // ICCCM 4.1.2.3
+            const baseismin = self.base_width == self.min_width and self.base_height == self.min_height;
+            if (!baseismin) {
+                w.* -= self.base_width;
+                h.* -= self.base_height;
+            }
+            // adjust for aspect limits
+            if (self.min_aspect > 0 and self.max_aspect > 0) {
+                if (self.max_aspect < @as(f32, @floatFromInt(w.*)) / @as(f32, @floatFromInt(h.*))) {
+                    w.* = @intFromFloat(@as(f32, @floatFromInt(h.*)) * self.max_aspect + 0.5);
+                } else if (self.min_aspect < @as(f32, @floatFromInt(h.*)) / @as(f32, @floatFromInt(w.*))) {
+                    h.* = @intFromFloat(@as(f32, @floatFromInt(w.*)) * self.min_aspect + 0.5);
+                }
+            }
+            if (baseismin) {
+                w.* -= self.base_width;
+                h.* -= self.base_height;
+            }
+            // adjust for increment value
+            if (self.inc_width != 0) w.* -= @mod(w.*, self.inc_width);
+            if (self.inc_height != 0) h.* -= @mod(h.*, self.inc_height);
+            // restore base dimensions
+            w.* = @max(w.* + self.base_width, self.min_width);
+            h.* = @max(h.* + self.base_height, self.min_height);
+            if (self.max_width != 0) w.* = @min(w.*, self.max_width);
+            if (self.max_height != 0) h.* = @min(h.*, self.max_height);
+        }
+        return x.* != self.x or y.* != self.y or w.* != self.w or h.* != self.h;
+    }
+
+    /// Reads ICCCM WM_NORMAL_HINTS (size hints) from the X server and stores
+    /// them in this Client struct. These hints define min/max size, aspect ratio,
+    /// resize increments, and base size — all used by applySizeHints to constrain
+    /// geometry. Also computes isfixed (whether min == max, meaning the window
+    /// can't be resized).
+    pub fn updateSizeHints(self: *Client) void {
+        const d = dpy orelse return;
+        var msize: c_long = undefined;
+        var size: x11.XSizeHints = std.mem.zeroes(x11.XSizeHints);
+        if (c.XGetWMNormalHints(d, self.window, &size, &msize) == 0) {
+            size.flags = x11.PSize;
+        }
+        if (size.flags & x11.PBaseSize != 0) {
+            self.base_width = @intCast(size.base_width);
+            self.base_height = @intCast(size.base_height);
+        } else if (size.flags & x11.PMinSize != 0) {
+            self.base_width = @intCast(size.min_width);
+            self.base_height = @intCast(size.min_height);
+        } else {
+            self.base_width = 0;
+            self.base_height = 0;
+        }
+        if (size.flags & x11.PResizeInc != 0) {
+            self.inc_width = @intCast(size.width_inc);
+            self.inc_height = @intCast(size.height_inc);
+        } else {
+            self.inc_width = 0;
+            self.inc_height = 0;
+        }
+        if (size.flags & x11.PMaxSize != 0) {
+            self.max_width = @intCast(size.max_width);
+            self.max_height = @intCast(size.max_height);
+        } else {
+            self.max_width = 0;
+            self.max_height = 0;
+        }
+        if (size.flags & x11.PMinSize != 0) {
+            self.min_width = @intCast(size.min_width);
+            self.min_height = @intCast(size.min_height);
+        } else if (size.flags & x11.PBaseSize != 0) {
+            self.min_width = @intCast(size.base_width);
+            self.min_height = @intCast(size.base_height);
+        } else {
+            self.min_width = 0;
+            self.min_height = 0;
+        }
+        if (size.flags & x11.PAspect != 0) {
+            self.min_aspect = @as(f32, @floatFromInt(size.min_aspect.y)) / @as(f32, @floatFromInt(size.min_aspect.x));
+            self.max_aspect = @as(f32, @floatFromInt(size.max_aspect.x)) / @as(f32, @floatFromInt(size.max_aspect.y));
+        } else {
+            self.min_aspect = 0.0;
+            self.max_aspect = 0.0;
+        }
+        self.isfixed = (self.max_width != 0 and self.max_height != 0 and self.max_width == self.min_width and self.max_height == self.min_height);
+    }
 };
 
 // A Monitor corresponds to a physical screen (via Xinerama).
@@ -150,38 +370,30 @@ pub const Monitor = struct {
     lt: [2]*const config.Layout = undefined, // two remembered layouts (toggle with setlayout)
 };
 
-// The system tray — an area in the bar that embeds external applet windows
-// (e.g. volume, network, bluetooth indicators) via the XEMBED protocol.
-const Systray = struct {
-    win: x11.Window = 0, // the container window that holds all tray icons
-    icons: ?*Client = null, // linked list of embedded icon "clients"
-};
-
 // --- Global state ---
 // These mirror the globals from the original dwm.c. They are set once during
 // setup() and then read/written throughout the event loop.
-var systray_ptr: ?*Systray = null;
 const broken: [*:0]const u8 = "broken"; // fallback window title when WM_NAME is empty
-var status_text: [256:0]u8 = [_:0]u8{0} ** 256; // root window name, shown in the bar's status area
-var screen: c_int = 0; // default X screen number
-var screen_width: c_int = 0; // total screen width in pixels
-var screen_height: c_int = 0; // total screen height in pixels
-var bar_height: c_int = 0; // height of the status bar (font height + 2)
+pub var status_text: [256:0]u8 = [_:0]u8{0} ** 256; // root window name, shown in the bar's status area
+pub var screen: c_int = 0; // default X screen number
+pub var screen_width: c_int = 0; // total screen width in pixels
+pub var screen_height: c_int = 0; // total screen height in pixels
+pub var bar_height: c_int = 0; // height of the status bar (font height + 2)
 var layout_label_width: c_int = 0; // width of the layout symbol text in the bar
-var text_lr_pad: c_int = 0; // left+right padding for text drawn in the bar
+pub var text_lr_pad: c_int = 0; // left+right padding for text drawn in the bar
 var xerrorxlib: ?*const fn (?*x11.Display, ?*x11.XErrorEvent) callconv(.c) c_int = null; // Xlib's default error handler (saved so we can restore it)
 var numlockmask: c_uint = 0; // dynamically determined NumLock modifier mask
-var wmatom: [WMLast]x11.Atom = [_]x11.Atom{0} ** WMLast; // ICCCM atoms
-var netatom: [NetLast]x11.Atom = [_]x11.Atom{0} ** NetLast; // EWMH atoms
-var xatom: [XLast]x11.Atom = [_]x11.Atom{0} ** XLast; // XEMBED atoms
+pub var wmatom: [WMLast]x11.Atom = [_]x11.Atom{0} ** WMLast; // ICCCM atoms
+pub var netatom: [NetLast]x11.Atom = [_]x11.Atom{0} ** NetLast; // EWMH atoms
+pub var xatom: [XLast]x11.Atom = [_]x11.Atom{0} ** XLast; // XEMBED atoms
 pub var running: bool = true; // main event loop flag — set to false by quit()
-var cursor: [CurLast]?*drw.CursorHandle = [_]?*drw.CursorHandle{null} ** CurLast; // cursor handles (normal, resize, move)
-var scheme: ?[][*]drw.Color = null; // array of color schemes (SchemeNorm, SchemeSel)
+pub var cursor: [CurLast]?*drw.CursorHandle = [_]?*drw.CursorHandle{null} ** CurLast; // cursor handles (normal, resize, move)
+pub var scheme: ?[][*]drw.Color = null; // array of color schemes (SchemeNorm, SchemeSel)
 pub var dpy: ?*x11.Display = null; // the X display connection (set in main.zig)
-var draw: ?*drw.DrawContext = null; // drawing context used for the bar
-var mons: ?*Monitor = null; // head of the linked list of all monitors
+pub var draw: ?*drw.DrawContext = null; // drawing context used for the bar
+pub var mons: ?*Monitor = null; // head of the linked list of all monitors
 pub var selmon: ?*Monitor = null; // the currently selected (focused) monitor
-var root: x11.Window = 0; // the root window of the default screen
+pub var root: x11.Window = 0; // the root window of the default screen
 var wmcheckwin: x11.Window = 0; // small helper window required by EWMH _NET_SUPPORTING_WM_CHECK
 pub var dmenumon_buf: [2:0]u8 = .{ '0', 0 }; // single-digit monitor number string passed to dmenu
 
@@ -203,29 +415,13 @@ fn CLEANMASK(mask: c_uint) c_uint {
         (x11.ShiftMask | x11.ControlMask | x11.Mod1Mask | x11.Mod2Mask | x11.Mod3Mask | x11.Mod4Mask | x11.Mod5Mask);
 }
 
-/// A client is visible if any of its tags overlap with the monitor's active tagset.
-fn ISVISIBLE(cl: *Client) bool {
-    const m = cl.mon orelse return false;
-    return (cl.tags & m.tagset[m.selected_tags]) != 0;
-}
-
 /// Event mask for grabbing mouse motion (used during move/resize drag operations).
 fn MOUSEMASK() c_long {
     return BUTTONMASK() | x11.PointerMotionMask;
 }
 
-/// Total width of a client window including its borders on both sides.
-fn WIDTH(cl: *Client) c_int {
-    return cl.w + 2 * cl.border_width;
-}
-
-/// Total height of a client window including its borders on top and bottom.
-fn HEIGHT(cl: *Client) c_int {
-    return cl.h + 2 * cl.border_width;
-}
-
 /// Measure the pixel width of a text string, including left+right padding.
-fn TEXTW(x: [*:0]const u8) c_int {
+pub fn TEXTW(x: [*:0]const u8) c_int {
     if (draw) |d| {
         return @as(c_int, @intCast(d.fontsetGetWidth(x))) + text_lr_pad;
     }
@@ -277,7 +473,7 @@ fn applyrules(cl: *Client) void {
     cl.tags = 0;
 
     var ch: x11.XClassHint = .{ .res_name = null, .res_class = null };
-    _ = c.XGetClassHint(d, cl.win, &ch);
+    _ = c.XGetClassHint(d, cl.window, &ch);
 
     const class_str: [*:0]const u8 = if (ch.res_class) |cls| cls else broken;
     const instance_str: [*:0]const u8 = if (ch.res_name) |name| name else broken;
@@ -291,7 +487,7 @@ fn applyrules(cl: *Client) void {
                     var m = mons;
                     while (m) |mon| : (m = mon.next) {
                         if (mon.num == r.monitor) {
-                            cl.mon = mon;
+                            cl.monitor = mon;
                             break;
                         }
                     }
@@ -303,7 +499,7 @@ fn applyrules(cl: *Client) void {
     if (ch.res_class) |cls| _ = c.XFree(cls);
     if (ch.res_name) |name| _ = c.XFree(name);
 
-    const m = cl.mon orelse return;
+    const m = cl.monitor orelse return;
     cl.tags = if (cl.tags & config.TAGMASK != 0) cl.tags & config.TAGMASK else m.tagset[m.selected_tags];
 }
 
@@ -315,61 +511,6 @@ fn cstrstr(haystack: [*:0]const u8, needle: [*:0]const u8) bool {
     if (n.len == 0) return true;
     if (h.len < n.len) return false;
     return std.mem.indexOf(u8, h, n) != null;
-}
-
-/// Clamps a client's requested geometry to respect ICCCM size hints (min/max size,
-/// aspect ratio, resize increments) and screen boundaries. Returns true if the
-/// geometry actually changed — callers use this to avoid unnecessary X calls.
-/// Without this, clients could request absurd sizes or escape the visible screen.
-fn applysizehints(cl: *Client, x: *c_int, y: *c_int, w: *c_int, h: *c_int, interact: bool) bool {
-    const m = cl.mon orelse return false;
-
-    // set minimum possible
-    w.* = @max(1, w.*);
-    h.* = @max(1, h.*);
-    if (interact) {
-        if (x.* > screen_width) x.* = screen_width - WIDTH(cl);
-        if (y.* > screen_height) y.* = screen_height - HEIGHT(cl);
-        if (x.* + w.* + 2 * cl.border_width < 0) x.* = 0;
-        if (y.* + h.* + 2 * cl.border_width < 0) y.* = 0;
-    } else {
-        if (x.* >= m.window_x + m.window_w) x.* = m.window_x + m.window_w - WIDTH(cl);
-        if (y.* >= m.window_y + m.window_h) y.* = m.window_y + m.window_h - HEIGHT(cl);
-        if (x.* + w.* + 2 * cl.border_width <= m.window_x) x.* = m.window_x;
-        if (y.* + h.* + 2 * cl.border_width <= m.window_y) y.* = m.window_y;
-    }
-    if (h.* < bar_height) h.* = bar_height;
-    if (w.* < bar_height) w.* = bar_height;
-
-    if (config.resizehints or cl.isfloating or (cl.mon != null and cl.mon.?.lt[cl.mon.?.selected_layout].arrange == null)) {
-        // ICCCM 4.1.2.3
-        const baseismin = cl.base_width == cl.min_width and cl.base_height == cl.min_height;
-        if (!baseismin) {
-            w.* -= cl.base_width;
-            h.* -= cl.base_height;
-        }
-        // adjust for aspect limits
-        if (cl.min_aspect > 0 and cl.max_aspect > 0) {
-            if (cl.max_aspect < @as(f32, @floatFromInt(w.*)) / @as(f32, @floatFromInt(h.*))) {
-                w.* = @intFromFloat(@as(f32, @floatFromInt(h.*)) * cl.max_aspect + 0.5);
-            } else if (cl.min_aspect < @as(f32, @floatFromInt(h.*)) / @as(f32, @floatFromInt(w.*))) {
-                h.* = @intFromFloat(@as(f32, @floatFromInt(w.*)) * cl.min_aspect + 0.5);
-            }
-        }
-        if (baseismin) {
-            w.* -= cl.base_width;
-            h.* -= cl.base_height;
-        }
-        // adjust for increment value
-        if (cl.inc_width != 0) w.* -= @mod(w.*, cl.inc_width);
-        if (cl.inc_height != 0) h.* -= @mod(h.*, cl.inc_height);
-        // restore base dimensions
-        w.* = @max(w.* + cl.base_width, cl.min_width);
-        h.* = @max(h.* + cl.base_height, cl.min_height);
-        if (cl.max_width != 0) w.* = @min(w.*, cl.max_width);
-        if (cl.max_height != 0) h.* = @min(h.*, cl.max_height);
-    }
-    return x.* != cl.x or y.* != cl.y or w.* != cl.w or h.* != cl.h;
 }
 
 /// Triggers a full layout recalculation. If a specific monitor is given, only that
@@ -399,25 +540,6 @@ fn arrangemon(m: *Monitor) void {
     @memcpy(m.layout_symbol[0..sym.len], sym);
     if (sym.len < m.layout_symbol.len) m.layout_symbol[sym.len] = 0;
     if (m.lt[m.selected_layout].arrange) |arrange_fn| arrange_fn(m);
-}
-
-/// Inserts a client at the head of its monitor's client list.
-/// New windows appear at the top of the master area because dwm uses a
-/// stack-like insertion order — the most recently attached client tiles first.
-fn attach(cl: *Client) void {
-    const m = cl.mon orelse return;
-    cl.next = m.clients;
-    m.clients = cl;
-}
-
-/// Inserts a client at the head of its monitor's focus-order stack.
-/// The stack list is separate from the client list and tracks focus history —
-/// the most recently focused client is always first, which determines what
-/// gets focused when the current selection is closed.
-fn attachstack(cl: *Client) void {
-    const m = cl.mon orelse return;
-    cl.snext = m.stack;
-    m.stack = cl;
 }
 
 /// X11 ButtonPress event handler. Determines which region of the bar was clicked
@@ -454,7 +576,7 @@ fn buttonpress(e: *x11.XEvent) void {
             arg = .{ .ui = @as(c_uint, 1) << @intCast(i) };
         } else if (ev.x < x + layout_label_width) {
             click = config.ClkLtSymbol;
-        } else if (ev.x > sm.window_w - TEXTW(&status_text) - @as(c_int, @intCast(getsystraywidth()))) {
+        } else if (ev.x > sm.window_w - TEXTW(&status_text) - @as(c_int, @intCast(systray.getsystraywidth()))) {
             click = config.ClkStatusText;
         } else {
             click = config.ClkWinTitle;
@@ -508,12 +630,7 @@ pub fn cleanup() void {
     while (mons != null) cleanupmon(mons.?);
 
     if (config.showsystray) {
-        if (systray_ptr) |st| {
-            _ = c.XUnmapWindow(d, st.win);
-            _ = c.XDestroyWindow(d, st.win);
-            alloc.destroy(st);
-            systray_ptr = null;
-        }
+        systray.cleanup();
     }
 
     for (0..CurLast) |i| {
@@ -556,65 +673,15 @@ fn cleanupmon(mon: *Monitor) void {
 /// 3. _NET_ACTIVE_WINDOW — another app asking us to activate a window (we just
 ///    mark it urgent rather than stealing focus, which is less disruptive)
 fn clientmessage(e: *x11.XEvent) void {
-    const d = dpy orelse return;
+    if (dpy == null) return;
     const cme = &e.xclient;
     const cl = wintoclient(cme.window);
 
     if (config.showsystray) {
-        if (systray_ptr) |st| {
+        if (systray.ptr) |st| {
             if (cme.window == st.win and cme.message_type == netatom[NetSystemTrayOP]) {
-                if (cme.data.l[1] == SYSTEM_TRAY_REQUEST_DOCK) {
-                    const icon = alloc.create(Client) catch {
-                        die("fatal: could not allocate Client");
-                        return;
-                    };
-                    icon.* = Client{};
-                    icon.win = @intCast(cme.data.l[2]);
-                    if (icon.win == 0) {
-                        alloc.destroy(icon);
-                        return;
-                    }
-                    icon.mon = selmon;
-                    icon.next = st.icons;
-                    st.icons = icon;
-
-                    var wa: x11.XWindowAttributes = undefined;
-                    if (c.XGetWindowAttributes(d, icon.win, &wa) == 0) {
-                        wa.width = @intCast(bar_height);
-                        wa.height = @intCast(bar_height);
-                        wa.border_width = 0;
-                    }
-                    icon.x = 0;
-                    icon.oldx = 0;
-                    icon.y = 0;
-                    icon.oldy = 0;
-                    icon.w = wa.width;
-                    icon.oldw = wa.width;
-                    icon.h = wa.height;
-                    icon.oldh = wa.height;
-                    icon.old_border_width = wa.border_width;
-                    icon.border_width = 0;
-                    icon.isfloating = true;
-                    icon.tags = 1;
-                    updatesizehints(icon);
-                    updatesystrayicongeom(icon, wa.width, wa.height);
-                    _ = c.XAddToSaveSet(d, icon.win);
-                    _ = c.XSelectInput(d, icon.win, x11.StructureNotifyMask | x11.PropertyChangeMask | x11.ResizeRedirectMask);
-                    _ = c.XReparentWindow(d, icon.win, st.win, 0, 0);
-
-                    if (scheme) |s| {
-                        var swa: x11.XSetWindowAttributes = std.mem.zeroes(x11.XSetWindowAttributes);
-                        swa.background_pixel = s[SchemeNorm][drw.ColBg].pixel;
-                        _ = c.XChangeWindowAttributes(d, icon.win, x11.CWBackPixel, &swa);
-                    }
-                    _ = sendevent(icon.win, netatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, XEMBED_EMBEDDED_NOTIFY, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
-                    _ = sendevent(icon.win, netatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, XEMBED_FOCUS_IN, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
-                    _ = sendevent(icon.win, netatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, XEMBED_WINDOW_ACTIVATE, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
-                    _ = sendevent(icon.win, netatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, XEMBED_MODALITY_ON, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
-                    _ = c.XSync(d, x11.False);
-                    if (selmon) |sm| resizebarwin(sm);
-                    updatesystray();
-                    setclientstate(icon, x11.NormalState);
+                if (cme.data.l[1] == systray.SYSTEM_TRAY_REQUEST_DOCK) {
+                    systray.handleDockRequest(cme.data.l[2]);
                 }
                 return;
             }
@@ -629,30 +696,9 @@ fn clientmessage(e: *x11.XEvent) void {
         }
     } else if (cme.message_type == netatom[NetActiveWindow]) {
         if (selmon) |sm| {
-            if (client != sm.sel and !client.isurgent) seturgent(client, true);
+            if (client != sm.sel and !client.isurgent) client.setUrgent(true);
         }
     }
-}
-
-/// Sends a synthetic ConfigureNotify event to a client, informing it of its
-/// current geometry. Required by ICCCM after we change a window's size/position
-/// so the client knows where it actually ended up (the WM may have adjusted
-/// what the client requested).
-fn configure(cl: *Client) void {
-    const d = dpy orelse return;
-    var ce: x11.XConfigureEvent = std.mem.zeroes(x11.XConfigureEvent);
-    ce.type = x11.ConfigureNotify;
-    ce.display = d;
-    ce.event = cl.win;
-    ce.window = cl.win;
-    ce.x = cl.x;
-    ce.y = cl.y;
-    ce.width = cl.w;
-    ce.height = cl.h;
-    ce.border_width = cl.border_width;
-    ce.above = x11.None;
-    ce.override_redirect = x11.False;
-    _ = c.XSendEvent(d, cl.win, x11.False, x11.StructureNotifyMask, @ptrCast(&ce));
 }
 
 /// Handles root window ConfigureNotify events, which fire when the screen
@@ -675,7 +721,7 @@ fn configurenotify(e: *x11.XEvent) void {
                 while (cl_it) |cl_c| : (cl_it = cl_c.next) {
                     if (cl_c.isfullscreen) resizeclient(cl_c, mon.monitor_x, mon.monitor_y, mon.monitor_w, mon.monitor_h);
                 }
-                resizebarwin(mon);
+                systray.resizebarwin(mon);
             }
             focus(null);
             arrange(null);
@@ -696,7 +742,7 @@ fn configurerequest(e: *x11.XEvent) void {
         if (ev.value_mask & x11.CWBorderWidth != 0) {
             cl.border_width = ev.border_width;
         } else if (cl.isfloating or (selmon != null and selmon.?.lt[selmon.?.selected_layout].arrange == null)) {
-            const m = cl.mon orelse return;
+            const m = cl.monitor orelse return;
             if (ev.value_mask & x11.CWX != 0) {
                 cl.oldx = cl.x;
                 cl.x = m.monitor_x + ev.x;
@@ -714,15 +760,15 @@ fn configurerequest(e: *x11.XEvent) void {
                 cl.h = ev.height;
             }
             if ((cl.x + cl.w) > m.monitor_x + m.monitor_w and cl.isfloating)
-                cl.x = m.monitor_x + @divTrunc(m.monitor_w, 2) - @divTrunc(WIDTH(cl), 2);
+                cl.x = m.monitor_x + @divTrunc(m.monitor_w, 2) - @divTrunc(cl.getWidth(), 2);
             if ((cl.y + cl.h) > m.monitor_y + m.monitor_h and cl.isfloating)
-                cl.y = m.monitor_y + @divTrunc(m.monitor_h, 2) - @divTrunc(HEIGHT(cl), 2);
+                cl.y = m.monitor_y + @divTrunc(m.monitor_h, 2) - @divTrunc(cl.getHeight(), 2);
             if ((ev.value_mask & (x11.CWX | x11.CWY) != 0) and (ev.value_mask & (x11.CWWidth | x11.CWHeight) == 0))
-                configure(cl);
-            if (ISVISIBLE(cl))
-                _ = c.XMoveResizeWindow(d, cl.win, cl.x, cl.y, @intCast(cl.w), @intCast(cl.h));
+                cl.sendConfigure();
+            if (cl.isVisible())
+                _ = c.XMoveResizeWindow(d, cl.window, cl.x, cl.y, @intCast(cl.w), @intCast(cl.h));
         } else {
-            configure(cl);
+            cl.sendConfigure();
         }
     } else {
         var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
@@ -762,47 +808,10 @@ fn destroynotify(e: *x11.XEvent) void {
     const ev = &e.xdestroywindow;
     if (wintoclient(ev.window)) |cl| {
         unmanage(cl, true);
-    } else if (wintosystrayicon(ev.window)) |icon| {
-        removesystrayicon(icon);
-        if (selmon) |sm| resizebarwin(sm);
-        updatesystray();
-    }
-}
-
-/// Removes a client from its monitor's tiling-order client list.
-/// Used before re-attaching to a different position, or before destroying the client.
-fn detach(cl: *Client) void {
-    const m = cl.mon orelse return;
-    var tc: *?*Client = &m.clients;
-    while (tc.* != null) {
-        if (tc.* == cl) {
-            tc.* = cl.next;
-            return;
-        }
-        tc = &tc.*.?.next;
-    }
-}
-
-/// Removes a client from its monitor's focus-order stack. If the removed client
-/// was the selected one, picks the next visible client in focus order as the
-/// new selection — this is how focus "falls through" when a window is closed.
-fn detachstack(cl: *Client) void {
-    const m = cl.mon orelse return;
-    var tc: *?*Client = &m.stack;
-    while (tc.* != null) {
-        if (tc.* == cl) {
-            tc.* = cl.snext;
-            break;
-        }
-        tc = &tc.*.?.snext;
-    }
-
-    if (cl == m.sel) {
-        var t = m.stack;
-        while (t) |tt| : (t = tt.snext) {
-            if (ISVISIBLE(tt)) break;
-        }
-        m.sel = t;
+    } else if (systray.wintosystrayicon(ev.window)) |icon| {
+        systray.removesystrayicon(icon);
+        if (selmon) |sm| systray.resizebarwin(sm);
+        systray.update();
     }
 }
 
@@ -840,8 +849,8 @@ fn drawbar(m: *Monitor) void {
     if (!m.showbar) return;
 
     var stw: c_uint = 0;
-    if (config.showsystray and systraytomon(m) == m and !config.systrayonleft)
-        stw = getsystraywidth();
+    if (config.showsystray and systray.systraytomon(m) == m and !config.systrayonleft)
+        stw = systray.getsystraywidth();
 
     // draw status first
     var tw: c_int = 0;
@@ -851,7 +860,7 @@ fn drawbar(m: *Monitor) void {
         _ = d.text(m.window_w - tw - @as(c_int, @intCast(stw)), 0, @intCast(tw), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2) - 2), &status_text, false);
     }
 
-    resizebarwin(m);
+    systray.resizebarwin(m);
 
     var occ: c_uint = 0;
     var urg: c_uint = 0;
@@ -910,7 +919,7 @@ fn enternotify(e: *x11.XEvent) void {
     const ev = &e.xcrossing;
     if ((ev.mode != x11.NotifyNormal or ev.detail == x11.NotifyInferior) and ev.window != root) return;
     const cl = wintoclient(ev.window);
-    const m = if (cl) |c_cl| c_cl.mon else wintomon(ev.window);
+    const m = if (cl) |c_cl| c_cl.monitor else wintomon(ev.window);
     const mon = m orelse return;
     if (mon != selmon) {
         if (selmon) |sm| unfocus(sm.sel, true);
@@ -929,7 +938,7 @@ fn expose(e: *x11.XEvent) void {
     if (ev.count == 0) {
         if (wintomon(ev.window)) |m| {
             drawbar(m);
-            if (m == selmon) updatesystray();
+            if (m == selmon) systray.update();
         }
     }
 }
@@ -944,11 +953,11 @@ fn focus(cl: ?*Client) void {
     const d = dpy orelse return;
     const s = scheme orelse return;
     var c_focus = cl;
-    if (c_focus == null or !ISVISIBLE(c_focus.?)) {
+    if (c_focus == null or !c_focus.?.isVisible()) {
         const sm = selmon orelse return;
         c_focus = sm.stack;
         while (c_focus) |cf| {
-            if (ISVISIBLE(cf)) break;
+            if (cf.isVisible()) break;
             c_focus = cf.snext;
         }
     }
@@ -956,12 +965,12 @@ fn focus(cl: ?*Client) void {
         if (sm.sel != null and sm.sel != c_focus) unfocus(sm.sel.?, false);
     }
     if (c_focus) |cf| {
-        if (cf.mon != selmon) selmon = cf.mon;
-        if (cf.isurgent) seturgent(cf, false);
-        detachstack(cf);
-        attachstack(cf);
+        if (cf.monitor != selmon) selmon = cf.monitor;
+        if (cf.isurgent) cf.setUrgent(false);
+        cf.detachStack();
+        cf.attachStack();
         grabbuttons(cf, true);
-        _ = c.XSetWindowBorder(d, cf.win, s[SchemeSel][drw.ColBorder].pixel);
+        _ = c.XSetWindowBorder(d, cf.window, s[SchemeSel][drw.ColBorder].pixel);
         setfocus(cf);
     } else {
         _ = c.XSetInputFocus(d, root, x11.RevertToPointerRoot, x11.CurrentTime);
@@ -978,7 +987,7 @@ fn focusin(e: *x11.XEvent) void {
     const ev = &e.xfocus;
     if (selmon) |sm| {
         if (sm.sel) |sel| {
-            if (ev.window != sel.win) setfocus(sel);
+            if (ev.window != sel.window) setfocus(sel);
         }
     }
 }
@@ -1007,25 +1016,25 @@ pub fn focusstack(arg: *const config.Arg) void {
     if (arg.i > 0) {
         found = sel.next;
         while (found) |f| {
-            if (ISVISIBLE(f)) break;
+            if (f.isVisible()) break;
             found = f.next;
         }
         if (found == null) {
             found = sm.clients;
             while (found) |f| {
-                if (ISVISIBLE(f)) break;
+                if (f.isVisible()) break;
                 found = f.next;
             }
         }
     } else {
         var i = sm.clients;
         while (i != null and i != sm.sel) {
-            if (ISVISIBLE(i.?)) found = i;
+            if (i.?.isVisible()) found = i;
             i = i.?.next;
         }
         if (found == null) {
             while (i != null) {
-                if (ISVISIBLE(i.?)) found = i;
+                if (i.?.isVisible()) found = i;
                 i = i.?.next;
             }
         }
@@ -1040,7 +1049,7 @@ pub fn focusstack(arg: *const config.Arg) void {
 /// properties like _NET_WM_STATE and XEMBED_INFO. The special-case for
 /// XembedInfo reads the second atom in the pair (the flags field), which
 /// tells us whether the systray icon should be mapped or hidden.
-fn getatomprop(cl: *Client, prop: x11.Atom) x11.Atom {
+pub fn getatomprop(cl: *Client, prop: x11.Atom) x11.Atom {
     const d = dpy orelse return x11.None;
     var di: c_int = undefined;
     var dl: c_ulong = undefined;
@@ -1052,7 +1061,7 @@ fn getatomprop(cl: *Client, prop: x11.Atom) x11.Atom {
     var req: x11.Atom = x11.XA_ATOM;
     if (prop == xatom[XembedInfo]) req = xatom[XembedInfo];
 
-    if (c.XGetWindowProperty(d, cl.win, prop, 0, @sizeOf(x11.Atom), x11.False, req, &da, &di, &dl, &dl2, @ptrCast(&p)) == x11.Success and p != null) {
+    if (c.XGetWindowProperty(d, cl.window, prop, 0, @sizeOf(x11.Atom), x11.False, req, &da, &di, &dl, &dl2, @ptrCast(&p)) == x11.Success and p != null) {
         atom = @as(*x11.Atom, @ptrCast(@alignCast(p.?))).*;
         if (da == xatom[XembedInfo] and dl == 2) atom = @as([*]x11.Atom, @ptrCast(@alignCast(p.?)))[1];
         _ = c.XFree(p);
@@ -1088,24 +1097,6 @@ fn getstate(w: x11.Window) c_long {
     if (n != 0 and p != null) result = p.?[0];
     if (p) |pp| _ = c.XFree(pp);
     return result;
-}
-
-/// Calculates the total pixel width of all system tray icons plus spacing.
-/// The bar layout subtracts this from the available width so the status text
-/// and tray don't overlap. Returns 1 (not 0) when empty so the tray window
-/// always has a minimum size and stays mapped.
-fn getsystraywidth() c_uint {
-    var w: c_uint = 0;
-    if (config.showsystray) {
-        if (systray_ptr) |st| {
-            var i = st.icons;
-            while (i) |icon| : (i = icon.next) {
-                w += @intCast(icon.w);
-                w += config.systrayspacing;
-            }
-        }
-    }
-    return if (w != 0) w + config.systrayspacing else 1;
 }
 
 /// Reads a text property (like WM_NAME) from a window into a buffer.
@@ -1149,14 +1140,14 @@ fn grabbuttons(cl: *Client, focused: bool) void {
     const d = dpy orelse return;
     updatenumlockmask();
     const modifiers = [_]c_uint{ 0, x11.LockMask, numlockmask, numlockmask | x11.LockMask };
-    _ = c.XUngrabButton(d, x11.AnyButton, x11.AnyModifier, cl.win);
+    _ = c.XUngrabButton(d, x11.AnyButton, x11.AnyModifier, cl.window);
     if (!focused) {
-        _ = c.XGrabButton(d, x11.AnyButton, x11.AnyModifier, cl.win, x11.False, @intCast(BUTTONMASK()), x11.GrabModeSync, x11.GrabModeSync, x11.None, x11.None);
+        _ = c.XGrabButton(d, x11.AnyButton, x11.AnyModifier, cl.window, x11.False, @intCast(BUTTONMASK()), x11.GrabModeSync, x11.GrabModeSync, x11.None, x11.None);
     }
     for (&config.buttons) |*btn| {
         if (btn.click == config.ClkClientWin) {
             for (modifiers) |mod| {
-                _ = c.XGrabButton(d, @intCast(btn.button), btn.mask | mod, cl.win, x11.False, @intCast(BUTTONMASK()), x11.GrabModeAsync, x11.GrabModeSync, x11.None, x11.None);
+                _ = c.XGrabButton(d, @intCast(btn.button), btn.mask | mod, cl.window, x11.False, @intCast(BUTTONMASK()), x11.GrabModeAsync, x11.GrabModeSync, x11.None, x11.None);
             }
         }
     }
@@ -1226,11 +1217,11 @@ pub fn killclient(_: *const config.Arg) void {
     const sm = selmon orelse return;
     const sel = sm.sel orelse return;
 
-    if (!sendevent(sel.win, wmatom[WMDelete], x11.NoEventMask, @intCast(wmatom[WMDelete]), x11.CurrentTime, 0, 0, 0)) {
+    if (!sendevent(sel.window, wmatom[WMDelete], x11.NoEventMask, @intCast(wmatom[WMDelete]), x11.CurrentTime, 0, 0, 0)) {
         _ = c.XGrabServer(d);
         _ = c.XSetErrorHandler(&xerrordummy);
         _ = c.XSetCloseDownMode(d, x11.DestroyAll);
-        _ = c.XKillClient(d, sel.win);
+        _ = c.XKillClient(d, sel.window);
         _ = c.XSync(d, x11.False);
         _ = c.XSetErrorHandler(&xerror);
         _ = c.XUngrabServer(d);
@@ -1248,7 +1239,7 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     const s = scheme orelse return;
     const cl = alloc.create(Client) catch return;
     cl.* = Client{};
-    cl.win = w;
+    cl.window = w;
     cl.x = wa.x;
     cl.oldx = wa.x;
     cl.y = wa.y;
@@ -1263,23 +1254,23 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     var trans: x11.Window = x11.None;
     if (c.XGetTransientForHint(d, w, &trans) != 0) {
         if (wintoclient(trans)) |t| {
-            cl.mon = t.mon;
+            cl.monitor = t.monitor;
             cl.tags = t.tags;
         } else {
-            cl.mon = selmon;
+            cl.monitor = selmon;
             applyrules(cl);
         }
     } else {
-        cl.mon = selmon;
+        cl.monitor = selmon;
         applyrules(cl);
     }
 
-    const m = cl.mon orelse {
+    const m = cl.monitor orelse {
         alloc.destroy(cl);
         return;
     };
-    if (cl.x + WIDTH(cl) > m.monitor_x + m.monitor_w) cl.x = m.monitor_x + m.monitor_w - WIDTH(cl);
-    if (cl.y + HEIGHT(cl) > m.monitor_y + m.monitor_h) cl.y = m.monitor_y + m.monitor_h - HEIGHT(cl);
+    if (cl.x + cl.getWidth() > m.monitor_x + m.monitor_w) cl.x = m.monitor_x + m.monitor_w - cl.getWidth();
+    if (cl.y + cl.getHeight() > m.monitor_y + m.monitor_h) cl.y = m.monitor_y + m.monitor_h - cl.getHeight();
     cl.x = @max(cl.x, m.monitor_x);
     if (m.bar_y == m.monitor_y and cl.x + @divTrunc(cl.w, 2) >= m.window_x and cl.x + @divTrunc(cl.w, 2) < m.window_x + m.window_w) {
         cl.y = @max(cl.y, bar_height);
@@ -1292,9 +1283,9 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     wc.border_width = cl.border_width;
     _ = c.XConfigureWindow(d, w, x11.CWBorderWidth, &wc);
     _ = c.XSetWindowBorder(d, w, s[SchemeNorm][drw.ColBorder].pixel);
-    configure(cl);
+    cl.sendConfigure();
     updatewindowtype(cl);
-    updatesizehints(cl);
+    cl.updateSizeHints();
     updatewmhints(cl);
     _ = c.XSelectInput(d, w, x11.EnterWindowMask | x11.FocusChangeMask | x11.PropertyChangeMask | x11.StructureNotifyMask);
     grabbuttons(cl, false);
@@ -1302,18 +1293,18 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
         cl.isfloating = (trans != x11.None or cl.isfixed);
         cl.was_floating = cl.isfloating;
     }
-    if (cl.isfloating) _ = c.XRaiseWindow(d, cl.win);
-    attach(cl);
-    attachstack(cl);
-    _ = c.XChangeProperty(d, root, netatom[NetClientList], x11.XA_WINDOW, 32, x11.PropModeAppend, @ptrCast(&cl.win), 1);
-    _ = c.XMoveResizeWindow(d, cl.win, cl.x + 2 * screen_width, cl.y, @intCast(cl.w), @intCast(cl.h));
-    setclientstate(cl, x11.NormalState);
-    if (cl.mon == selmon) {
+    if (cl.isfloating) _ = c.XRaiseWindow(d, cl.window);
+    cl.attach();
+    cl.attachStack();
+    _ = c.XChangeProperty(d, root, netatom[NetClientList], x11.XA_WINDOW, 32, x11.PropModeAppend, @ptrCast(&cl.window), 1);
+    _ = c.XMoveResizeWindow(d, cl.window, cl.x + 2 * screen_width, cl.y, @intCast(cl.w), @intCast(cl.h));
+    cl.setClientState(x11.NormalState);
+    if (cl.monitor == selmon) {
         if (selmon) |sm| unfocus(sm.sel, false);
     }
     m.sel = cl;
     arrange(m);
-    _ = c.XMapWindow(d, cl.win);
+    _ = c.XMapWindow(d, cl.window);
     focus(null);
 }
 
@@ -1334,12 +1325,12 @@ fn maprequest(e: *x11.XEvent) void {
     const d = dpy orelse return;
     const ev = &e.xmaprequest;
 
-    if (wintosystrayicon(ev.window)) |icon| {
-        if (systray_ptr) |st| {
-            _ = sendevent(icon.win, netatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, XEMBED_WINDOW_ACTIVATE, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
+    if (systray.wintosystrayicon(ev.window)) |icon| {
+        if (systray.ptr) |st| {
+            _ = sendevent(icon.window, netatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, systray.XEMBED_WINDOW_ACTIVATE, 0, @intCast(st.win), systray.XEMBED_EMBEDDED_VERSION);
         }
-        if (selmon) |sm| resizebarwin(sm);
-        updatesystray();
+        if (selmon) |sm| systray.resizebarwin(sm);
+        systray.update();
     }
 
     var wa: x11.XWindowAttributes = undefined;
@@ -1355,7 +1346,7 @@ pub fn monocle(m: *Monitor) void {
     var n: c_uint = 0;
     var cl_it = m.clients;
     while (cl_it) |cl_c| : (cl_it = cl_c.next) {
-        if (ISVISIBLE(cl_c)) n += 1;
+        if (cl_c.isVisible()) n += 1;
     }
     if (n > 0) {
         _ = std.fmt.bufPrint(&m.layout_symbol, "[{d}]", .{n}) catch {};
@@ -1417,13 +1408,13 @@ pub fn movemouse(_: *const config.Arg) void {
                 var ny = ocy + (ev.xmotion.y - y);
                 if (@abs(sm.window_x - nx) < config.snap) {
                     nx = sm.window_x;
-                } else if (@abs((sm.window_x + sm.window_w) - (nx + WIDTH(cl))) < config.snap) {
-                    nx = sm.window_x + sm.window_w - WIDTH(cl);
+                } else if (@abs((sm.window_x + sm.window_w) - (nx + cl.getWidth())) < config.snap) {
+                    nx = sm.window_x + sm.window_w - cl.getWidth();
                 }
                 if (@abs(sm.window_y - ny) < config.snap) {
                     ny = sm.window_y;
-                } else if (@abs((sm.window_y + sm.window_h) - (ny + HEIGHT(cl))) < config.snap) {
-                    ny = sm.window_y + sm.window_h - HEIGHT(cl);
+                } else if (@abs((sm.window_y + sm.window_h) - (ny + cl.getHeight())) < config.snap) {
+                    ny = sm.window_y + sm.window_h - cl.getHeight();
                 }
                 if (!cl.isfloating and sm.lt[sm.selected_layout].arrange != null and
                     (@abs(nx - cl.x) > @as(c_int, config.snap) or @abs(ny - cl.y) > @as(c_int, config.snap)))
@@ -1453,7 +1444,7 @@ pub fn movemouse(_: *const config.Arg) void {
 fn nexttiled(cl: ?*Client) ?*Client {
     var c_it = cl;
     while (c_it) |cc| : (c_it = cc.next) {
-        if (!cc.isfloating and ISVISIBLE(cc)) return cc;
+        if (!cc.isfloating and cc.isVisible()) return cc;
     }
     return null;
 }
@@ -1462,10 +1453,10 @@ fn nexttiled(cl: ?*Client) ?*Client {
 /// in tiled layout), focuses it, and re-arranges. Used by zoom() to promote
 /// a window to the master area.
 fn pop(cl: *Client) void {
-    detach(cl);
-    attach(cl);
+    cl.detach();
+    cl.attach();
     focus(cl);
-    arrange(cl.mon);
+    arrange(cl.monitor);
 }
 
 /// Handles PropertyNotify events — a window property changed. This is how we
@@ -1477,15 +1468,15 @@ fn propertynotify(e: *x11.XEvent) void {
     const d = dpy orelse return;
     const ev = &e.xproperty;
 
-    if (wintosystrayicon(ev.window)) |icon| {
+    if (systray.wintosystrayicon(ev.window)) |icon| {
         if (ev.atom == x11.XA_WM_NORMAL_HINTS) {
-            updatesizehints(icon);
-            updatesystrayicongeom(icon, icon.w, icon.h);
+            icon.updateSizeHints();
+            systray.updatesystrayicongeom(icon, icon.w, icon.h);
         } else {
-            updatesystrayiconstate(icon, ev);
+            systray.updatesystrayiconstate(icon, ev);
         }
-        if (selmon) |sm| resizebarwin(sm);
-        updatesystray();
+        if (selmon) |sm| systray.resizebarwin(sm);
+        systray.update();
     }
 
     if (ev.window == root and ev.atom == x11.XA_WM_NAME) {
@@ -1496,12 +1487,12 @@ fn propertynotify(e: *x11.XEvent) void {
         switch (ev.atom) {
             x11.XA_WM_TRANSIENT_FOR => {
                 var trans: x11.Window = undefined;
-                if (!cl.isfloating and c.XGetTransientForHint(d, cl.win, &trans) != 0) {
+                if (!cl.isfloating and c.XGetTransientForHint(d, cl.window, &trans) != 0) {
                     cl.isfloating = wintoclient(trans) != null;
-                    if (cl.isfloating) arrange(cl.mon);
+                    if (cl.isfloating) arrange(cl.monitor);
                 }
             },
-            x11.XA_WM_NORMAL_HINTS => updatesizehints(cl),
+            x11.XA_WM_NORMAL_HINTS => cl.updateSizeHints(),
             x11.XA_WM_HINTS => {
                 updatewmhints(cl);
                 drawbars();
@@ -1510,7 +1501,7 @@ fn propertynotify(e: *x11.XEvent) void {
         }
         if (ev.atom == x11.XA_WM_NAME or ev.atom == netatom[NetWMName]) {
             updatetitle(cl);
-            if (cl.mon) |mon| {
+            if (cl.monitor) |mon| {
                 if (cl == mon.sel) drawbar(mon);
             }
         }
@@ -1541,23 +1532,6 @@ fn recttomon(x: c_int, y: c_int, w: c_int, h: c_int) ?*Monitor {
     return r;
 }
 
-/// Unlinks a systray icon from the icon list and frees its Client struct.
-/// Called when a tray applet's window is destroyed or unmapped.
-fn removesystrayicon(i: ?*Client) void {
-    const icon = i orelse return;
-    if (!config.showsystray) return;
-    const st = systray_ptr orelse return;
-    var ii: *?*Client = &st.icons;
-    while (ii.* != null) {
-        if (ii.* == icon) {
-            ii.* = icon.next;
-            break;
-        }
-        ii = &ii.*.?.next;
-    }
-    alloc.destroy(icon);
-}
-
 /// High-level resize: applies size hints to the requested geometry, then calls
 /// resizeclient only if the geometry actually changed. This avoids unnecessary
 /// X server round-trips when the layout re-arranges but nothing actually moved.
@@ -1566,17 +1540,7 @@ fn resize(cl: *Client, x: c_int, y: c_int, w: c_int, h: c_int, interact: bool) v
     var yv = y;
     var wv = w;
     var hv = h;
-    if (applysizehints(cl, &xv, &yv, &wv, &hv, interact)) resizeclient(cl, xv, yv, wv, hv);
-}
-
-/// Adjusts the bar window's width to account for the system tray, then
-/// repositions it. Called whenever the tray width changes or the bar is toggled.
-fn resizebarwin(m: *Monitor) void {
-    const d = dpy orelse return;
-    var w: c_uint = @intCast(m.window_w);
-    if (config.showsystray and systraytomon(m) == m and !config.systrayonleft)
-        w -= getsystraywidth();
-    _ = c.XMoveResizeWindow(d, m.barwin, m.window_x, m.bar_y, w, @intCast(bar_height));
+    if (cl.applySizeHints(&xv, &yv, &wv, &hv, interact)) resizeclient(cl, xv, yv, wv, hv);
 }
 
 /// Low-level resize: saves old geometry, applies new geometry to the Client
@@ -1599,8 +1563,8 @@ fn resizeclient(cl: *Client, x: c_int, y: c_int, w: c_int, h: c_int) void {
     cl.h = h;
     wc.height = h;
     wc.border_width = cl.border_width;
-    _ = c.XConfigureWindow(d, cl.win, x11.CWX | x11.CWY | x11.CWWidth | x11.CWHeight | x11.CWBorderWidth, &wc);
-    configure(cl);
+    _ = c.XConfigureWindow(d, cl.window, x11.CWX | x11.CWY | x11.CWWidth | x11.CWHeight | x11.CWBorderWidth, &wc);
+    cl.sendConfigure();
     _ = c.XSync(d, x11.False);
 }
 
@@ -1619,7 +1583,7 @@ pub fn resizemouse(_: *const config.Arg) void {
     const ocy = cl.y;
     if (c.XGrabPointer(d, root, x11.False, @intCast(MOUSEMASK()), x11.GrabModeAsync, x11.GrabModeAsync, x11.None, cursor[CurResize].?.cursor, x11.CurrentTime) != x11.GrabSuccess)
         return;
-    _ = c.XWarpPointer(d, x11.None, cl.win, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
+    _ = c.XWarpPointer(d, x11.None, cl.window, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
     var lasttime: x11.Time = 0;
     var ev: x11.XEvent = undefined;
     while (true) {
@@ -1633,8 +1597,8 @@ pub fn resizemouse(_: *const config.Arg) void {
                 lasttime = ev.xmotion.time;
                 const nw = @max(ev.xmotion.x - ocx - 2 * cl.border_width + 1, 1);
                 const nh = @max(ev.xmotion.y - ocy - 2 * cl.border_width + 1, 1);
-                if (cl.mon.?.window_x + nw >= sm.window_x and cl.mon.?.window_x + nw <= sm.window_x + sm.window_w and
-                    cl.mon.?.window_y + nh >= sm.window_y and cl.mon.?.window_y + nh <= sm.window_y + sm.window_h)
+                if (cl.monitor.?.window_x + nw >= sm.window_x and cl.monitor.?.window_x + nw <= sm.window_x + sm.window_w and
+                    cl.monitor.?.window_y + nh >= sm.window_y and cl.monitor.?.window_y + nh <= sm.window_y + sm.window_h)
                 {
                     if (!cl.isfloating and sm.lt[sm.selected_layout].arrange != null and
                         (@abs(nw - cl.w) > @as(c_int, config.snap) or @abs(nh - cl.h) > @as(c_int, config.snap)))
@@ -1649,7 +1613,7 @@ pub fn resizemouse(_: *const config.Arg) void {
             else => {},
         }
     }
-    _ = c.XWarpPointer(d, x11.None, cl.win, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
+    _ = c.XWarpPointer(d, x11.None, cl.window, 0, 0, 0, 0, cl.w + cl.border_width - 1, cl.h + cl.border_width - 1);
     _ = c.XUngrabPointer(d, x11.CurrentTime);
     while (c.XCheckMaskEvent(d, x11.EnterWindowMask, &ev) != 0) {}
     if (recttomon(cl.x, cl.y, cl.w, cl.h)) |m| {
@@ -1665,10 +1629,10 @@ pub fn resizemouse(_: *const config.Arg) void {
 /// themselves (they're embedded), so we update their geometry and refresh the tray.
 fn resizerequest(e: *x11.XEvent) void {
     const ev = &e.xresizerequest;
-    if (wintosystrayicon(ev.window)) |icon| {
-        updatesystrayicongeom(icon, ev.width, ev.height);
-        if (selmon) |sm| resizebarwin(sm);
-        updatesystray();
+    if (systray.wintosystrayicon(ev.window)) |icon| {
+        systray.updatesystrayicongeom(icon, ev.width, ev.height);
+        if (selmon) |sm| systray.resizebarwin(sm);
+        systray.update();
     }
 }
 
@@ -1681,16 +1645,16 @@ fn restack(m: *Monitor) void {
     drawbar(m);
     const sel = m.sel orelse return;
     if (sel.isfloating or m.lt[m.selected_layout].arrange == null)
-        _ = c.XRaiseWindow(d, sel.win);
+        _ = c.XRaiseWindow(d, sel.window);
     if (m.lt[m.selected_layout].arrange != null) {
         var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
         wc.stack_mode = x11.Below;
         wc.sibling = m.barwin;
         var cl_it = m.stack;
         while (cl_it) |cl_c| : (cl_it = cl_c.snext) {
-            if (!cl_c.isfloating and ISVISIBLE(cl_c)) {
-                _ = c.XConfigureWindow(d, cl_c.win, x11.CWSibling | x11.CWStackMode, &wc);
-                wc.sibling = cl_c.win;
+            if (!cl_c.isfloating and cl_c.isVisible()) {
+                _ = c.XConfigureWindow(d, cl_c.window, x11.CWSibling | x11.CWStackMode, &wc);
+                wc.sibling = cl_c.window;
             }
         }
     }
@@ -1751,32 +1715,23 @@ pub fn scan() void {
 /// client's tags to match the destination monitor's active tagset so it becomes
 /// immediately visible there. Re-arranges both monitors.
 fn sendmon(cl: *Client, m: *Monitor) void {
-    if (cl.mon == m) return;
+    if (cl.monitor == m) return;
     unfocus(cl, true);
-    detach(cl);
-    detachstack(cl);
-    cl.mon = m;
+    cl.detach();
+    cl.detachStack();
+    cl.monitor = m;
     cl.tags = m.tagset[m.selected_tags];
-    attach(cl);
-    attachstack(cl);
+    cl.attach();
+    cl.attachStack();
     focus(null);
     arrange(null);
-}
-
-/// Sets the WM_STATE property on a client window (NormalState, IconicState, or
-/// WithdrawnState). Required by ICCCM so pagers and session managers can query
-/// window state.
-fn setclientstate(cl: *Client, state: c_long) void {
-    const d = dpy orelse return;
-    const data = [2]c_long{ state, x11.None };
-    _ = c.XChangeProperty(d, cl.win, wmatom[WMState], wmatom[WMState], 32, x11.PropModeReplace, @ptrCast(&data), 2);
 }
 
 /// Sends a ClientMessage event to a window. For WM protocol messages (WMDelete,
 /// WMTakeFocus) it first checks if the client actually advertises support for
 /// that protocol — returns false if not, so the caller can fall back to a
 /// forceful action. For XEMBED messages, it sends unconditionally.
-fn sendevent(w: x11.Window, proto: x11.Atom, mask: c_int, d0: c_long, d1: c_long, d2: c_long, d3: c_long, d4: c_long) bool {
+pub fn sendevent(w: x11.Window, proto: x11.Atom, mask: c_int, d0: c_long, d1: c_long, d2: c_long, d3: c_long, d4: c_long) bool {
     const d = dpy orelse return false;
     var n: c_int = undefined;
     var protocols: ?[*]x11.Atom = null;
@@ -1822,10 +1777,10 @@ fn sendevent(w: x11.Window, proto: x11.Atom, mask: c_int, d0: c_long, d1: c_long
 fn setfocus(cl: *Client) void {
     const d = dpy orelse return;
     if (!cl.neverfocus) {
-        _ = c.XSetInputFocus(d, cl.win, x11.RevertToPointerRoot, x11.CurrentTime);
-        _ = c.XChangeProperty(d, root, netatom[NetActiveWindow], x11.XA_WINDOW, 32, x11.PropModeReplace, @ptrCast(&cl.win), 1);
+        _ = c.XSetInputFocus(d, cl.window, x11.RevertToPointerRoot, x11.CurrentTime);
+        _ = c.XChangeProperty(d, root, netatom[NetActiveWindow], x11.XA_WINDOW, 32, x11.PropModeReplace, @ptrCast(&cl.window), 1);
     }
-    _ = sendevent(cl.win, wmatom[WMTakeFocus], x11.NoEventMask, @intCast(wmatom[WMTakeFocus]), x11.CurrentTime, 0, 0, 0);
+    _ = sendevent(cl.window, wmatom[WMTakeFocus], x11.NoEventMask, @intCast(wmatom[WMTakeFocus]), x11.CurrentTime, 0, 0, 0);
 }
 
 /// Toggles a client in/out of fullscreen mode. Going fullscreen saves the old
@@ -1835,16 +1790,16 @@ fn setfocus(cl: *Client) void {
 fn setfullscreen(cl: *Client, fullscreen: bool) void {
     const d = dpy orelse return;
     if (fullscreen and !cl.isfullscreen) {
-        _ = c.XChangeProperty(d, cl.win, netatom[NetWMState], x11.XA_ATOM, 32, x11.PropModeReplace, @ptrCast(&netatom[NetWMFullscreen]), 1);
+        _ = c.XChangeProperty(d, cl.window, netatom[NetWMState], x11.XA_ATOM, 32, x11.PropModeReplace, @ptrCast(&netatom[NetWMFullscreen]), 1);
         cl.isfullscreen = true;
         cl.was_floating = cl.isfloating;
         cl.old_border_width = cl.border_width;
         cl.border_width = 0;
         cl.isfloating = true;
-        if (cl.mon) |m| resizeclient(cl, m.monitor_x, m.monitor_y, m.monitor_w, m.monitor_h);
-        _ = c.XRaiseWindow(d, cl.win);
+        if (cl.monitor) |m| resizeclient(cl, m.monitor_x, m.monitor_y, m.monitor_w, m.monitor_h);
+        _ = c.XRaiseWindow(d, cl.window);
     } else if (!fullscreen and cl.isfullscreen) {
-        _ = c.XChangeProperty(d, cl.win, netatom[NetWMState], x11.XA_ATOM, 32, x11.PropModeReplace, null, 0);
+        _ = c.XChangeProperty(d, cl.window, netatom[NetWMState], x11.XA_ATOM, 32, x11.PropModeReplace, null, 0);
         cl.isfullscreen = false;
         cl.isfloating = cl.was_floating;
         cl.border_width = cl.old_border_width;
@@ -1853,7 +1808,7 @@ fn setfullscreen(cl: *Client, fullscreen: bool) void {
         cl.w = cl.oldw;
         cl.h = cl.oldh;
         resizeclient(cl, cl.x, cl.y, cl.w, cl.h);
-        arrange(cl.mon);
+        arrange(cl.monitor);
     }
 }
 
@@ -1957,7 +1912,7 @@ pub fn setup() void {
     }
 
     // init system tray
-    updatesystray();
+    systray.update();
     // init bars
     updatebars();
     updatestatus();
@@ -1983,22 +1938,6 @@ pub fn setup() void {
     focus(null);
 }
 
-/// Sets or clears the urgency flag on a client and updates the X11 WM_HINTS
-/// accordingly. Urgent windows get highlighted in the bar's tag indicators
-/// so the user notices they need attention.
-fn seturgent(cl: *Client, urg: bool) void {
-    const d = dpy orelse return;
-    cl.isurgent = urg;
-    const wmh = c.XGetWMHints(d, cl.win) orelse return;
-    if (urg) {
-        wmh.*.flags |= x11.XUrgencyHint;
-    } else {
-        wmh.*.flags &= ~@as(c_long, x11.XUrgencyHint);
-    }
-    _ = c.XSetWMHints(d, cl.win, wmh);
-    _ = c.XFree(wmh);
-}
-
 /// Recursively shows visible clients and hides invisible ones by walking the
 /// focus stack. Visible clients are moved to their actual position; invisible
 /// ones are moved off-screen (x = -2 * width). This is called before layout
@@ -2007,14 +1946,14 @@ fn seturgent(cl: *Client, urg: bool) void {
 fn showhide(cl: ?*Client) void {
     const d = dpy orelse return;
     const cl_c = cl orelse return;
-    if (ISVISIBLE(cl_c)) {
-        _ = c.XMoveWindow(d, cl_c.win, cl_c.x, cl_c.y);
-        if ((cl_c.mon != null and cl_c.mon.?.lt[cl_c.mon.?.selected_layout].arrange == null or cl_c.isfloating) and !cl_c.isfullscreen)
+    if (cl_c.isVisible()) {
+        _ = c.XMoveWindow(d, cl_c.window, cl_c.x, cl_c.y);
+        if ((cl_c.monitor != null and cl_c.monitor.?.lt[cl_c.monitor.?.selected_layout].arrange == null or cl_c.isfloating) and !cl_c.isfullscreen)
             resize(cl_c, cl_c.x, cl_c.y, cl_c.w, cl_c.h, false);
         showhide(cl_c.snext);
     } else {
         showhide(cl_c.snext);
-        _ = c.XMoveWindow(d, cl_c.win, WIDTH(cl_c) * -2, cl_c.y);
+        _ = c.XMoveWindow(d, cl_c.window, cl_c.getWidth() * -2, cl_c.y);
     }
 }
 
@@ -2116,11 +2055,11 @@ pub fn tile(m: *Monitor) void {
         if (i < @as(c_uint, @intCast(m.num_masters))) {
             const h = @divTrunc(m.window_h - my, @as(c_int, @intCast(@min(n, @as(c_uint, @intCast(m.num_masters))) - i)));
             resize(cl_c, m.window_x, m.window_y + my, mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);
-            if (my + HEIGHT(cl_c) < m.window_h) my += HEIGHT(cl_c);
+            if (my + cl_c.getHeight() < m.window_h) my += cl_c.getHeight();
         } else {
             const h = @divTrunc(m.window_h - ty, @as(c_int, @intCast(n - i)));
             resize(cl_c, m.window_x + mw, m.window_y + ty, m.window_w - mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);
-            if (ty + HEIGHT(cl_c) < m.window_h) ty += HEIGHT(cl_c);
+            if (ty + cl_c.getHeight() < m.window_h) ty += cl_c.getHeight();
         }
         i += 1;
     }
@@ -2134,9 +2073,9 @@ pub fn togglebar(_: *const config.Arg) void {
     const sm = selmon orelse return;
     sm.showbar = !sm.showbar;
     updatebarpos(sm);
-    resizebarwin(sm);
+    systray.resizebarwin(sm);
     if (config.showsystray) {
-        if (systray_ptr) |st| {
+        if (systray.ptr) |st| {
             var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
             if (!sm.showbar) {
                 wc.y = -bar_height;
@@ -2199,7 +2138,7 @@ fn unfocus(cl: ?*Client, set_focus: bool) void {
     const s = scheme orelse return;
     const cl_c = cl orelse return;
     grabbuttons(cl_c, false);
-    _ = c.XSetWindowBorder(d, cl_c.win, s[SchemeNorm][drw.ColBorder].pixel);
+    _ = c.XSetWindowBorder(d, cl_c.window, s[SchemeNorm][drw.ColBorder].pixel);
     if (set_focus) {
         _ = c.XSetInputFocus(d, root, x11.RevertToPointerRoot, x11.CurrentTime);
         _ = c.XDeleteProperty(d, root, netatom[NetActiveWindow]);
@@ -2213,17 +2152,17 @@ fn unfocus(cl: ?*Client, set_focus: bool) void {
 /// re-arrange the layout to fill the gap.
 fn unmanage(cl: *Client, destroyed: bool) void {
     const d = dpy orelse return;
-    const m = cl.mon;
-    detach(cl);
-    detachstack(cl);
+    const m = cl.monitor;
+    cl.detach();
+    cl.detachStack();
     if (!destroyed) {
         var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
         wc.border_width = cl.old_border_width;
         _ = c.XGrabServer(d);
         _ = c.XSetErrorHandler(&xerrordummy);
-        _ = c.XConfigureWindow(d, cl.win, x11.CWBorderWidth, &wc);
-        _ = c.XUngrabButton(d, x11.AnyButton, x11.AnyModifier, cl.win);
-        setclientstate(cl, x11.WithdrawnState);
+        _ = c.XConfigureWindow(d, cl.window, x11.CWBorderWidth, &wc);
+        _ = c.XUngrabButton(d, x11.AnyButton, x11.AnyModifier, cl.window);
+        cl.setClientState(x11.WithdrawnState);
         _ = c.XSync(d, x11.False);
         _ = c.XSetErrorHandler(&xerror);
         _ = c.XUngrabServer(d);
@@ -2242,13 +2181,13 @@ fn unmapnotify(e: *x11.XEvent) void {
     const ev = &e.xunmap;
     if (wintoclient(ev.window)) |cl| {
         if (ev.send_event != 0) {
-            setclientstate(cl, x11.WithdrawnState);
+            cl.setClientState(x11.WithdrawnState);
         } else {
             unmanage(cl, false);
         }
-    } else if (wintosystrayicon(ev.window)) |icon| {
-        _ = c.XMapRaised(dpy.?, icon.win);
-        updatesystray();
+    } else if (systray.wintosystrayicon(ev.window)) |icon| {
+        _ = c.XMapRaised(dpy.?, icon.window);
+        systray.update();
     }
 }
 
@@ -2267,11 +2206,11 @@ fn updatebars() void {
     while (m) |mon| : (m = mon.next) {
         if (mon.barwin != 0) continue;
         var w: c_uint = @intCast(mon.window_w);
-        if (config.showsystray and systraytomon(mon) == mon) w -= getsystraywidth();
+        if (config.showsystray and systray.systraytomon(mon) == mon) w -= systray.getsystraywidth();
         mon.barwin = c.XCreateWindow(d, root, mon.window_x, mon.bar_y, w, @intCast(bar_height), 0, @intCast(c.DefaultDepth(d, screen)), x11.CopyFromParent, c.DefaultVisual(d, screen), x11.CWOverrideRedirect | x11.CWBackPixmap | x11.CWEventMask, &wa);
         if (cursor[CurNormal]) |cur| _ = c.XDefineCursor(d, mon.barwin, cur.cursor);
-        if (config.showsystray and systraytomon(mon) == mon) {
-            if (systray_ptr) |st| _ = c.XMapRaised(d, st.win);
+        if (config.showsystray and systray.systraytomon(mon) == mon) {
+            if (systray.ptr) |st| _ = c.XMapRaised(d, st.win);
         }
         _ = c.XMapRaised(d, mon.barwin);
         _ = c.XSetClassHint(d, mon.barwin, &ch);
@@ -2304,7 +2243,7 @@ fn updateclientlist() void {
     while (m) |mon| : (m = mon.next) {
         var cl_it = mon.clients;
         while (cl_it) |cl_c| : (cl_it = cl_c.next) {
-            _ = c.XChangeProperty(d, root, netatom[NetClientList], x11.XA_WINDOW, 32, x11.PropModeAppend, @ptrCast(&cl_c.win), 1);
+            _ = c.XChangeProperty(d, root, netatom[NetClientList], x11.XA_WINDOW, 32, x11.PropModeAppend, @ptrCast(&cl_c.window), 1);
         }
     }
 }
@@ -2385,12 +2324,12 @@ fn updategeom() bool {
                     while (mm.clients) |cl_c| {
                         dirty = true;
                         mm.clients = cl_c.next;
-                        detachstack(cl_c);
-                        cl_c.mon = mons;
+                        cl_c.detachStack();
+                        cl_c.monitor = mons;
                         if (mons) |first| {
                             _ = first;
-                            attach(cl_c);
-                            attachstack(cl_c);
+                            cl_c.attach();
+                            cl_c.attachStack();
                         }
                     }
                     if (mm == selmon) selmon = mons;
@@ -2438,62 +2377,6 @@ fn updatenumlockmask() void {
     }
 }
 
-/// Reads ICCCM size hints (WM_NORMAL_HINTS) from a client's window and stores
-/// them in the Client struct. These hints define min/max size, aspect ratio,
-/// resize increments, and base size — all used by applysizehints to constrain
-/// geometry. Also computes isfixed (whether min == max, meaning the window
-/// can't be resized).
-fn updatesizehints(cl: *Client) void {
-    const d = dpy orelse return;
-    var msize: c_long = undefined;
-    var size: x11.XSizeHints = std.mem.zeroes(x11.XSizeHints);
-    if (c.XGetWMNormalHints(d, cl.win, &size, &msize) == 0) {
-        size.flags = x11.PSize;
-    }
-    if (size.flags & x11.PBaseSize != 0) {
-        cl.base_width = @intCast(size.base_width);
-        cl.base_height = @intCast(size.base_height);
-    } else if (size.flags & x11.PMinSize != 0) {
-        cl.base_width = @intCast(size.min_width);
-        cl.base_height = @intCast(size.min_height);
-    } else {
-        cl.base_width = 0;
-        cl.base_height = 0;
-    }
-    if (size.flags & x11.PResizeInc != 0) {
-        cl.inc_width = @intCast(size.width_inc);
-        cl.inc_height = @intCast(size.height_inc);
-    } else {
-        cl.inc_width = 0;
-        cl.inc_height = 0;
-    }
-    if (size.flags & x11.PMaxSize != 0) {
-        cl.max_width = @intCast(size.max_width);
-        cl.max_height = @intCast(size.max_height);
-    } else {
-        cl.max_width = 0;
-        cl.max_height = 0;
-    }
-    if (size.flags & x11.PMinSize != 0) {
-        cl.min_width = @intCast(size.min_width);
-        cl.min_height = @intCast(size.min_height);
-    } else if (size.flags & x11.PBaseSize != 0) {
-        cl.min_width = @intCast(size.base_width);
-        cl.min_height = @intCast(size.base_height);
-    } else {
-        cl.min_width = 0;
-        cl.min_height = 0;
-    }
-    if (size.flags & x11.PAspect != 0) {
-        cl.min_aspect = @as(f32, @floatFromInt(size.min_aspect.y)) / @as(f32, @floatFromInt(size.min_aspect.x));
-        cl.max_aspect = @as(f32, @floatFromInt(size.max_aspect.x)) / @as(f32, @floatFromInt(size.max_aspect.y));
-    } else {
-        cl.min_aspect = 0.0;
-        cl.max_aspect = 0.0;
-    }
-    cl.isfixed = (cl.max_width != 0 and cl.max_height != 0 and cl.max_width == cl.min_width and cl.max_height == cl.min_height);
-}
-
 /// Reads the root window's WM_NAME property as the status bar text. External
 /// tools like slstatus/xsetroot set this property, and we display it in the
 /// bar's status area. Falls back to "dwm-VERSION" if no name is set.
@@ -2504,144 +2387,14 @@ fn updatestatus() void {
         status_text[default_status.len] = 0;
     }
     if (selmon) |sm| drawbar(sm);
-    updatesystray();
-}
-
-/// Scales a systray icon to fit the bar height, preserving aspect ratio.
-/// Icons that are square get bar_height x bar_height; non-square icons are
-/// scaled proportionally. Ensures no icon exceeds the bar height.
-fn updatesystrayicongeom(icon: *Client, w: c_int, h: c_int) void {
-    icon.h = bar_height;
-    if (w == h) {
-        icon.w = bar_height;
-    } else if (h == bar_height) {
-        icon.w = w;
-    } else {
-        icon.w = @intFromFloat(@as(f32, @floatFromInt(bar_height)) * (@as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(h))));
-    }
-    _ = applysizehints(icon, &icon.x, &icon.y, &icon.w, &icon.h, false);
-    if (icon.h > bar_height) {
-        if (icon.w == icon.h) {
-            icon.w = bar_height;
-        } else {
-            icon.w = @intFromFloat(@as(f32, @floatFromInt(bar_height)) * (@as(f32, @floatFromInt(icon.w)) / @as(f32, @floatFromInt(icon.h))));
-        }
-        icon.h = bar_height;
-    }
-}
-
-/// Reacts to XEMBED_INFO property changes on a systray icon. Maps or unmaps
-/// the icon based on the XEMBED_MAPPED flag, and sends the appropriate
-/// XEMBED activate/deactivate message so the icon knows its visibility state.
-fn updatesystrayiconstate(icon: *Client, ev: *x11.XPropertyEvent) void {
-    if (!config.showsystray or ev.atom != xatom[XembedInfo]) return;
-    const flags = getatomprop(icon, xatom[XembedInfo]);
-    if (flags == 0) return;
-
-    var code: c_long = 0;
-    if (flags & XEMBED_MAPPED != 0 and icon.tags == 0) {
-        icon.tags = 1;
-        code = XEMBED_WINDOW_ACTIVATE;
-        _ = c.XMapRaised(dpy.?, icon.win);
-        setclientstate(icon, x11.NormalState);
-    } else if (flags & XEMBED_MAPPED == 0 and icon.tags != 0) {
-        icon.tags = 0;
-        code = XEMBED_WINDOW_DEACTIVATE;
-        _ = c.XUnmapWindow(dpy.?, icon.win);
-        setclientstate(icon, x11.WithdrawnState);
-    } else {
-        return;
-    }
-    if (systray_ptr) |st| {
-        _ = sendevent(icon.win, xatom[XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, code, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
-    }
-}
-
-/// Creates (if first call) or repositions/redraws the system tray window. On
-/// first call, creates a simple window, claims the _NET_SYSTEM_TRAY_S0 selection,
-/// and advertises itself as the tray manager. On subsequent calls, repositions
-/// all embedded icons in a horizontal row, resizes the tray window to fit,
-/// and stacks it above the bar. This is the systray patch's main rendering function.
-fn updatesystray() void {
-    const d = dpy orelse return;
-    const s = scheme orelse return;
-    if (!config.showsystray) return;
-
-    const m = systraytomon(null) orelse return;
-    var x_pos: c_int = m.monitor_x + m.monitor_w;
-    const status_w = TEXTW(&status_text) - text_lr_pad + @as(c_int, @intCast(config.systrayspacing));
-    var w: c_uint = 1;
-
-    if (config.systrayonleft) x_pos -= status_w + @divTrunc(text_lr_pad, 2);
-
-    if (systray_ptr == null) {
-        // init systray
-        const st = alloc.create(Systray) catch {
-            die("fatal: could not allocate Systray");
-            return;
-        };
-        st.* = Systray{};
-        systray_ptr = st;
-        st.win = c.XCreateSimpleWindow(d, root, x_pos, m.bar_y, w, @intCast(bar_height), 0, 0, s[SchemeSel][drw.ColBg].pixel);
-        var wa: x11.XSetWindowAttributes = std.mem.zeroes(x11.XSetWindowAttributes);
-        wa.event_mask = x11.ButtonPressMask | x11.ExposureMask;
-        wa.override_redirect = x11.True;
-        wa.background_pixel = s[SchemeNorm][drw.ColBg].pixel;
-        _ = c.XSelectInput(d, st.win, x11.SubstructureNotifyMask);
-        _ = c.XChangeProperty(d, st.win, netatom[NetSystemTrayOrientation], x11.XA_CARDINAL, 32, x11.PropModeReplace, @ptrCast(&netatom[NetSystemTrayOrientationHorz]), 1);
-        _ = c.XChangeWindowAttributes(d, st.win, x11.CWEventMask | x11.CWOverrideRedirect | x11.CWBackPixel, &wa);
-        _ = c.XMapRaised(d, st.win);
-        _ = c.XSetSelectionOwner(d, netatom[NetSystemTray], st.win, x11.CurrentTime);
-        if (c.XGetSelectionOwner(d, netatom[NetSystemTray]) == st.win) {
-            _ = sendevent(root, xatom[XembedManager], x11.StructureNotifyMask, x11.CurrentTime, @intCast(netatom[NetSystemTray]), @intCast(st.win), 0, 0);
-            _ = c.XSync(d, x11.False);
-        } else {
-            std.debug.print("dwm: unable to obtain system tray.\n", .{});
-            alloc.destroy(st);
-            systray_ptr = null;
-            return;
-        }
-    }
-
-    const st = systray_ptr orelse return;
-    w = 0;
-    var icon = st.icons;
-    while (icon) |i| : (icon = i.next) {
-        var wa: x11.XSetWindowAttributes = std.mem.zeroes(x11.XSetWindowAttributes);
-        wa.background_pixel = s[SchemeNorm][drw.ColBg].pixel;
-        _ = c.XChangeWindowAttributes(d, i.win, x11.CWBackPixel, &wa);
-        _ = c.XMapRaised(d, i.win);
-        w += config.systrayspacing;
-        i.x = @intCast(w);
-        _ = c.XMoveResizeWindow(d, i.win, i.x, 0, @intCast(i.w), @intCast(i.h));
-        w += @intCast(i.w);
-        if (i.mon != m) i.mon = m;
-    }
-    w = if (w != 0) w + config.systrayspacing else 1;
-    x_pos -= @intCast(w);
-    _ = c.XMoveResizeWindow(d, st.win, x_pos, m.bar_y, w, @intCast(bar_height));
-    var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
-    wc.x = x_pos;
-    wc.y = m.bar_y;
-    wc.width = @intCast(w);
-    wc.height = bar_height;
-    wc.stack_mode = x11.Above;
-    wc.sibling = m.barwin;
-    _ = c.XConfigureWindow(d, st.win, x11.CWX | x11.CWY | x11.CWWidth | x11.CWHeight | x11.CWSibling | x11.CWStackMode, &wc);
-    _ = c.XMapWindow(d, st.win);
-    _ = c.XMapSubwindows(d, st.win);
-    if (draw) |dr| {
-        _ = c.XSetForeground(d, dr.gc, s[SchemeNorm][drw.ColBg].pixel);
-        _ = c.XFillRectangle(d, st.win, dr.gc, 0, 0, w, @intCast(bar_height));
-    }
-    _ = c.XSync(d, x11.False);
+    systray.update();
 }
 
 /// Reads the client's title from _NET_WM_NAME (UTF-8) or falls back to
 /// WM_NAME (Latin-1). Sets a "broken" placeholder if both are empty.
 fn updatetitle(cl: *Client) void {
-    if (!gettextprop(cl.win, netatom[NetWMName], &cl.name)) {
-        _ = gettextprop(cl.win, x11.XA_WM_NAME, &cl.name);
+    if (!gettextprop(cl.window, netatom[NetWMName], &cl.name)) {
+        _ = gettextprop(cl.window, x11.XA_WM_NAME, &cl.name);
     }
     if (cl.name[0] == 0) {
         const b = std.mem.span(broken);
@@ -2666,11 +2419,11 @@ fn updatewindowtype(cl: *Client) void {
 /// (like certain Java apps) set this to false, so we track it as `neverfocus`.
 fn updatewmhints(cl: *Client) void {
     const d = dpy orelse return;
-    const wmh = c.XGetWMHints(d, cl.win) orelse return;
+    const wmh = c.XGetWMHints(d, cl.window) orelse return;
     if (selmon) |sm| {
         if (cl == sm.sel and wmh.*.flags & x11.XUrgencyHint != 0) {
             wmh.*.flags &= ~@as(c_long, x11.XUrgencyHint);
-            _ = c.XSetWMHints(d, cl.win, wmh);
+            _ = c.XSetWMHints(d, cl.window, wmh);
         } else {
             cl.isurgent = (wmh.*.flags & x11.XUrgencyHint) != 0;
         }
@@ -2703,20 +2456,8 @@ fn wintoclient(w: x11.Window) ?*Client {
     while (m) |mon| : (m = mon.next) {
         var cl_it = mon.clients;
         while (cl_it) |cl_c| : (cl_it = cl_c.next) {
-            if (cl_c.win == w) return cl_c;
+            if (cl_c.window == w) return cl_c;
         }
-    }
-    return null;
-}
-
-/// Looks up a systray icon Client by its X window ID. Returns null if the
-/// window isn't a systray icon or if systray is disabled.
-fn wintosystrayicon(w: x11.Window) ?*Client {
-    if (!config.showsystray or w == 0) return null;
-    const st = systray_ptr orelse return null;
-    var i = st.icons;
-    while (i) |icon| : (i = icon.next) {
-        if (icon.win == w) return icon;
     }
     return null;
 }
@@ -2732,7 +2473,7 @@ fn wintomon(w: x11.Window) ?*Monitor {
     while (m) |mon| : (m = mon.next) {
         if (w == mon.barwin) return mon;
     }
-    if (wintoclient(w)) |cl| return cl.mon;
+    if (wintoclient(w)) |cl| return cl.monitor;
     return selmon;
 }
 
@@ -2770,30 +2511,6 @@ fn xerrordummy(_: ?*x11.Display, _: ?*x11.XErrorEvent) callconv(.c) c_int {
 fn xerrorstart(_: ?*x11.Display, _: ?*x11.XErrorEvent) callconv(.c) c_int {
     die("dwm: another window manager is already running");
     return -1;
-}
-
-/// Determines which monitor should host the system tray based on config.
-/// If systraypinning is 0, the tray follows the selected monitor. Otherwise
-/// it's pinned to a specific monitor number (with a fallback-to-first option).
-fn systraytomon(m: ?*Monitor) ?*Monitor {
-    if (config.systraypinning == 0) {
-        if (m == null) return selmon;
-        return if (m == selmon) m else null;
-    }
-    var n: c_int = 1;
-    var t = mons;
-    while (t != null and t.?.next != null) : ({
-        n += 1;
-        t = t.?.next;
-    }) {}
-    t = mons;
-    var i: c_uint = 1;
-    while (t != null and t.?.next != null and i < config.systraypinning) : ({
-        i += 1;
-        t = t.?.next;
-    }) {}
-    if (config.systraypinningfailfirst and n < @as(c_int, @intCast(config.systraypinning))) return mons;
-    return t;
 }
 
 /// Keybinding action: promotes the focused window to the master area. If it's
@@ -2848,7 +2565,7 @@ pub fn f1switchfocus(_: *const config.Arg) void {
 
 /// Prints an error message and exits immediately. Used for unrecoverable
 /// errors like allocation failures or detecting another WM is running.
-fn die(msg: []const u8) void {
+pub fn die(msg: []const u8) void {
     std.debug.print("{s}\n", .{msg});
     std.process.exit(1);
 }

@@ -286,6 +286,8 @@ fn buttonpress(e: *x11.XEvent) void {
             click = ClkLtSymbol;
         } else if (ev.x > sm.window_w - bar.statusWidth() - @as(c_int, @intCast(systray.getsystraywidth()))) {
             click = ClkStatusText;
+            // Dispatch to individual block click handlers
+            if (ev.button == x11.Button1) status.handleClick(ev.x);
         } else {
             click = ClkWinTitle;
         }

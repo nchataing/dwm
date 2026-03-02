@@ -24,6 +24,11 @@ pub const Block = struct {
     /// Color pair: [0] = fg (ColFg), [1] = bg (ColBg).
     /// Stored as a 2-element array so we can pass it directly to drw.setScheme().
     colors: [2]drw.Color = undefined,
+    /// Optional click handler for this block.
+    onClick: ?*const fn () void = null,
+    /// Pixel x position and width, set during drawbar for hit-testing.
+    x: c_int = 0,
+    w: c_int = 0,
 
     pub fn scheme(self: *Block) [*]drw.Color {
         return &self.colors;
@@ -39,6 +44,7 @@ var col_bat_normal: drw.Color = undefined;
 var col_bat_warning: drw.Color = undefined;
 var col_bat_critical: drw.Color = undefined;
 var col_bat_charging: drw.Color = undefined;
+var col_brightness_fg: drw.Color = undefined;
 var col_time_fg: drw.Color = undefined;
 var col_status_bg: drw.Color = undefined;
 
@@ -49,6 +55,7 @@ pub fn initColors(d: *drw.DrawContext) void {
     d.colorCreate(&col_bat_warning, colors.bat_warning);
     d.colorCreate(&col_bat_critical, colors.bat_critical);
     d.colorCreate(&col_bat_charging, colors.bat_charging);
+    d.colorCreate(&col_brightness_fg, colors.brightness_fg);
     d.colorCreate(&col_time_fg, colors.time_fg);
     d.colorCreate(&col_status_bg, colors.status_bg);
 }
@@ -80,6 +87,70 @@ fn readSysFile(buf: []u8, comptime path: [*:0]const u8) []const u8 {
 // ── Status segments ─────────────────────────────────────────────────────────
 
 const SegmentFn = *const fn (*Block) bool;
+
+// ── Brightness ──────────────────────────────────────────────────────────────
+
+const brightness_presets = [_]u8{ 25, 10, 3 };
+
+fn getBrightness(block: *Block) bool {
+    var cur_buf: [16]u8 = undefined;
+    var max_buf: [16]u8 = undefined;
+    const cur_str = readSysFile(&cur_buf, "/sys/class/backlight/intel_backlight/brightness");
+    const max_str = readSysFile(&max_buf, "/sys/class/backlight/intel_backlight/max_brightness");
+
+    const cur = std.fmt.parseInt(u32, cur_str, 10) catch return false;
+    const max = std.fmt.parseInt(u32, max_str, 10) catch return false;
+    if (max == 0) return false;
+
+    const pct = (cur * 100 + max / 2) / max; // rounded percentage
+    const text = std.fmt.bufPrint(&block.text, "\xe2\x98\x80 {d}%", .{pct}) catch return false;
+    block.text[text.len] = 0;
+
+    block.colors[0] = col_brightness_fg;
+    block.colors[1] = col_status_bg;
+    block.onClick = &onClickBrightness;
+    return true;
+}
+
+fn onClickBrightness() void {
+    // Read current brightness percentage
+    var cur_buf: [16]u8 = undefined;
+    var max_buf: [16]u8 = undefined;
+    const cur_str = readSysFile(&cur_buf, "/sys/class/backlight/intel_backlight/brightness");
+    const max_str = readSysFile(&max_buf, "/sys/class/backlight/intel_backlight/max_brightness");
+    const cur = std.fmt.parseInt(u32, cur_str, 10) catch return;
+    const max = std.fmt.parseInt(u32, max_str, 10) catch return;
+    if (max == 0) return;
+    const pct = (cur * 100 + max / 2) / max;
+
+    // Find next preset: first one strictly below current, or wrap to highest
+    var target: u8 = brightness_presets[0];
+    for (brightness_presets) |preset| {
+        if (preset < pct) {
+            target = preset;
+            break;
+        }
+    }
+
+    // Format the target as a string for xbacklight
+    var arg_buf: [8:0]u8 = undefined;
+    const arg_str = std.fmt.bufPrint(&arg_buf, "{d}", .{target}) catch return;
+    arg_buf[arg_str.len] = 0;
+
+    const pid = std.c.fork();
+    if (pid == 0) {
+        // child — close X connection and exec xbacklight
+        const x11 = @import("x11.zig");
+        const dwm = @import("dwm.zig");
+        if (dwm.dpy) |dp| std.posix.close(@intCast(x11.c.ConnectionNumber(dp)));
+        _ = std.c.setsid();
+        const argv = [_:null]?[*:0]const u8{ "xbacklight", "-set", &arg_buf, null };
+        _ = x11.c.execvp("xbacklight", @ptrCast(&argv));
+        std.process.exit(0);
+    }
+}
+
+// ── Battery ─────────────────────────────────────────────────────────────────
 
 fn getBattery(block: *Block) bool {
     var status_buf: [64]u8 = undefined;
@@ -126,6 +197,7 @@ fn getTime(block: *Block) bool {
 }
 
 const segments: []const SegmentFn = &.{
+    &getBrightness,
     &getBattery,
     &getTime,
 };
@@ -141,6 +213,16 @@ pub fn update() void {
         }
     }
     block_count = count;
+}
+
+/// Hit-test: find the block at pixel position `px` and invoke its onClick.
+pub fn handleClick(px: c_int) void {
+    for (0..block_count) |i| {
+        if (px >= blocks[i].x and px < blocks[i].x + blocks[i].w) {
+            if (blocks[i].onClick) |cb| cb();
+            return;
+        }
+    }
 }
 
 // ── Timer integration ───────────────────────────────────────────────────────

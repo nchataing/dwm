@@ -25,4 +25,6 @@ pub const bat_warning: [*:0]const u8 = "#f9e2af"; // yellow — battery low
 pub const bat_critical: [*:0]const u8 = "#f38ba8"; // red — battery critical
 pub const bat_charging: [*:0]const u8 = "#89b4fa"; // blue — charging
 
+pub const brightness_fg: [*:0]const u8 = gray3; // same as time
+
 pub const time_fg: [*:0]const u8 = gray3;

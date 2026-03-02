@@ -96,8 +96,8 @@ pub var dmenumon_buf: [2:0]u8 = .{ '0', 0 }; // single-digit monitor number stri
 const alloc = std.heap.c_allocator;
 
 // ── Appearance config ───────────────────────────────────────────────────────
-pub const fonts = [_][*:0]const u8{"monospace:size=10"};
-pub const dmenufont: [*:0]const u8 = "monospace:size=10";
+pub const fonts = [_][*:0]const u8{"Berkeley Mono:size=10"};
+pub const dmenufont: [*:0]const u8 = "Berkeley Mono:size=10";
 
 // --- Helper functions ---
 // These replace the C preprocessor macros from the original dwm.c.

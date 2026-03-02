@@ -62,8 +62,16 @@ pub fn drawbar(m: *Monitor) void {
         tw = statusWidth();
         // draw blocks left-to-right starting from the right edge
         var sx = m.window_w - tw - @as(c_int, @intCast(stw));
+
+        // Clear the entire status area with the normal scheme background
+        // so inter-block gaps don't show stale pixmap content.
+        d.setScheme(s[dwm.SchemeNorm]);
+        d.rect(sx, 0, @intCast(tw), @intCast(bar_height), true, true);
+
         for (0..status.block_count) |i| {
             const bw = textWidth(&status.blocks[i].text);
+            status.blocks[i].x = sx;
+            status.blocks[i].w = bw;
             d.setScheme(status.blocks[i].scheme());
             _ = d.text(sx, 0, @intCast(bw), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), &status.blocks[i].text, false);
             sx += bw + 2; // 2px gap between blocks

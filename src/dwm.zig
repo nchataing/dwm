@@ -10,6 +10,7 @@ const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
 const config = @import("config.zig");
 const systray = @import("systray.zig");
+const xerror = @import("xerror.zig");
 const c = x11.c;
 
 const VERSION = "6.3";
@@ -445,7 +446,6 @@ pub var screen_height: c_int = 0; // total screen height in pixels
 pub var bar_height: c_int = 0; // height of the status bar (font height + 2)
 var layout_label_width: c_int = 0; // width of the layout symbol text in the bar
 pub var text_lr_pad: c_int = 0; // left+right padding for text drawn in the bar
-var xerrorxlib: ?*const fn (?*x11.Display, ?*x11.XErrorEvent) callconv(.c) c_int = null; // Xlib's default error handler (saved so we can restore it)
 var numlockmask: c_uint = 0; // dynamically determined NumLock modifier mask
 pub var wmatom: [WMLast]x11.Atom = [_]x11.Atom{0} ** WMLast; // ICCCM atoms
 pub var netatom: [NetLast]x11.Atom = [_]x11.Atom{0} ** NetLast; // EWMH atoms
@@ -654,10 +654,10 @@ fn buttonpress(e: *x11.XEvent) void {
 /// run before setup() to avoid corrupting an existing WM session.
 pub fn checkotherwm() void {
     const d = dpy orelse return;
-    xerrorxlib = c.XSetErrorHandler(&xerrorstart);
+    xerror.xlib = c.XSetErrorHandler(&xerror.startup);
     _ = c.XSelectInput(d, c.DefaultRootWindow(d), x11.SubstructureRedirectMask);
     _ = c.XSync(d, x11.False);
-    _ = c.XSetErrorHandler(&xerror);
+    _ = c.XSetErrorHandler(&xerror.handler);
     _ = c.XSync(d, x11.False);
 }
 
@@ -1226,11 +1226,11 @@ pub fn killclient(_: *const config.Arg) void {
 
     if (!sendevent(sel.window, wmatom[WMDelete], x11.NoEventMask, @intCast(wmatom[WMDelete]), x11.CurrentTime, 0, 0, 0)) {
         _ = c.XGrabServer(d);
-        _ = c.XSetErrorHandler(&xerrordummy);
+        _ = c.XSetErrorHandler(&xerror.dummy);
         _ = c.XSetCloseDownMode(d, x11.DestroyAll);
         _ = c.XKillClient(d, sel.window);
         _ = c.XSync(d, x11.False);
-        _ = c.XSetErrorHandler(&xerror);
+        _ = c.XSetErrorHandler(&xerror.handler);
         _ = c.XUngrabServer(d);
     }
 }
@@ -2136,12 +2136,12 @@ fn unmanage(cl: *Client, destroyed: bool) void {
         var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
         wc.border_width = cl.old_border_width;
         _ = c.XGrabServer(d);
-        _ = c.XSetErrorHandler(&xerrordummy);
+        _ = c.XSetErrorHandler(&xerror.dummy);
         _ = c.XConfigureWindow(d, cl.window, x11.CWBorderWidth, &wc);
         _ = c.XUngrabButton(d, x11.AnyButton, x11.AnyModifier, cl.window);
         cl.setClientState(x11.WithdrawnState);
         _ = c.XSync(d, x11.False);
-        _ = c.XSetErrorHandler(&xerror);
+        _ = c.XSetErrorHandler(&xerror.handler);
         _ = c.XUngrabServer(d);
     }
     alloc.destroy(cl);
@@ -2433,42 +2433,6 @@ fn wintomon(w: x11.Window) ?*Monitor {
     }
     if (wintoclient(w)) |cl| return cl.monitor;
     return selmon;
-}
-
-/// The main X error handler. Silences known-harmless errors that occur during
-/// normal WM operation (e.g. BadWindow from race conditions where a client
-/// destroys its window before we process a pending event, BadAccess from
-/// grab conflicts). Fatal errors are logged and forwarded to the default handler.
-fn xerror(_: ?*x11.Display, ee: ?*x11.XErrorEvent) callconv(.c) c_int {
-    const ev = ee orelse return 0;
-    if (ev.error_code == x11.BadWindow or
-        (ev.request_code == x11.X_SetInputFocus and ev.error_code == x11.BadMatch) or
-        (ev.request_code == x11.X_PolyText8 and ev.error_code == x11.BadDrawable) or
-        (ev.request_code == x11.X_PolyFillRectangle and ev.error_code == x11.BadDrawable) or
-        (ev.request_code == x11.X_PolySegment and ev.error_code == x11.BadDrawable) or
-        (ev.request_code == x11.X_ConfigureWindow and ev.error_code == x11.BadMatch) or
-        (ev.request_code == x11.X_GrabButton and ev.error_code == x11.BadAccess) or
-        (ev.request_code == x11.X_GrabKey and ev.error_code == x11.BadAccess) or
-        (ev.request_code == x11.X_CopyArea and ev.error_code == x11.BadDrawable))
-        return 0;
-    std.debug.print("dwm: fatal error: request code={d}, error code={d}\n", .{ ev.request_code, ev.error_code });
-    if (xerrorxlib) |handler_fn| return handler_fn(dpy, ee);
-    return 0;
-}
-
-/// No-op error handler used temporarily during operations that may trigger
-/// X errors we want to ignore (e.g. restoring a dead client's border width
-/// during unmanage).
-fn xerrordummy(_: ?*x11.Display, _: ?*x11.XErrorEvent) callconv(.c) c_int {
-    return 0;
-}
-
-/// Temporary error handler installed during checkotherwm(). If any X error
-/// fires while we try to select SubstructureRedirect on root, it means
-/// another WM is already running. We abort with a clear error message.
-fn xerrorstart(_: ?*x11.Display, _: ?*x11.XErrorEvent) callconv(.c) c_int {
-    die("dwm: another window manager is already running");
-    return -1;
 }
 
 /// Keybinding action: promotes the focused window to the master area. If it's

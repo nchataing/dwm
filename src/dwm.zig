@@ -66,7 +66,6 @@ pub const WMState = 2; // WM_STATE — track normal/iconic/withdrawn state
 pub const WMTakeFocus = 3; // WM_TAKE_FOCUS — give keyboard focus to a client
 const WMLast = 4;
 
-pub const EmbedState = client.EmbedState;
 pub const Client = client.Client;
 
 pub const Monitor = monitor.Monitor;

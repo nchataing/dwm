@@ -21,18 +21,110 @@ const alloc = std.heap.c_allocator;
 // Fallback window title when WM_NAME is empty.
 const broken: [*:0]const u8 = "broken";
 
-// XEMBED visibility state for system tray icons.
-// Replaces the old hack of (ab)using Client.tag as a boolean (0=hidden, 1=visible).
-pub const EmbedState = enum { inactive, active };
+/// ICCCM WM_NORMAL_HINTS: the size-constraint data shared by both Client
+/// and TrayIcon. Owns the parsing logic (update) and the core constraint
+/// logic (apply), so neither struct duplicates it.
+pub const SizeHints = struct {
+    min_aspect: f32 = 0,
+    max_aspect: f32 = 0,
+    base_width: c_int = 0,
+    base_height: c_int = 0,
+    inc_width: c_int = 0,
+    inc_height: c_int = 0,
+    max_width: c_int = 0,
+    max_height: c_int = 0,
+    min_width: c_int = 0,
+    min_height: c_int = 0,
+
+    /// Reads WM_NORMAL_HINTS from the X server for `window` and populates
+    /// this struct. Returns whether the window has fixed size (min == max).
+    pub fn update(self: *SizeHints, window: x11.Window) bool {
+        const d = dwm.dpy orelse return false;
+        var msize: c_long = undefined;
+        var size: x11.XSizeHints = std.mem.zeroes(x11.XSizeHints);
+        if (c.XGetWMNormalHints(d, window, &size, &msize) == 0) {
+            size.flags = x11.PSize;
+        }
+        if (size.flags & x11.PBaseSize != 0) {
+            self.base_width = @intCast(size.base_width);
+            self.base_height = @intCast(size.base_height);
+        } else if (size.flags & x11.PMinSize != 0) {
+            self.base_width = @intCast(size.min_width);
+            self.base_height = @intCast(size.min_height);
+        } else {
+            self.base_width = 0;
+            self.base_height = 0;
+        }
+        if (size.flags & x11.PResizeInc != 0) {
+            self.inc_width = @intCast(size.width_inc);
+            self.inc_height = @intCast(size.height_inc);
+        } else {
+            self.inc_width = 0;
+            self.inc_height = 0;
+        }
+        if (size.flags & x11.PMaxSize != 0) {
+            self.max_width = @intCast(size.max_width);
+            self.max_height = @intCast(size.max_height);
+        } else {
+            self.max_width = 0;
+            self.max_height = 0;
+        }
+        if (size.flags & x11.PMinSize != 0) {
+            self.min_width = @intCast(size.min_width);
+            self.min_height = @intCast(size.min_height);
+        } else if (size.flags & x11.PBaseSize != 0) {
+            self.min_width = @intCast(size.base_width);
+            self.min_height = @intCast(size.base_height);
+        } else {
+            self.min_width = 0;
+            self.min_height = 0;
+        }
+        if (size.flags & x11.PAspect != 0) {
+            self.min_aspect = @as(f32, @floatFromInt(size.min_aspect.y)) / @as(f32, @floatFromInt(size.min_aspect.x));
+            self.max_aspect = @as(f32, @floatFromInt(size.max_aspect.x)) / @as(f32, @floatFromInt(size.max_aspect.y));
+        } else {
+            self.min_aspect = 0.0;
+            self.max_aspect = 0.0;
+        }
+        return self.max_width != 0 and self.max_height != 0 and
+            self.max_width == self.min_width and self.max_height == self.min_height;
+    }
+
+    /// Constrains (w, h) to ICCCM size hints in-place.
+    pub fn apply(self: *SizeHints, w: *c_int, h: *c_int) void {
+        w.* = @max(1, w.*);
+        h.* = @max(1, h.*);
+        const baseismin = self.base_width == self.min_width and self.base_height == self.min_height;
+        if (!baseismin) {
+            w.* -= self.base_width;
+            h.* -= self.base_height;
+        }
+        if (self.min_aspect > 0 and self.max_aspect > 0) {
+            if (self.max_aspect < @as(f32, @floatFromInt(w.*)) / @as(f32, @floatFromInt(h.*))) {
+                w.* = @intFromFloat(@as(f32, @floatFromInt(h.*)) * self.max_aspect + 0.5);
+            } else if (self.min_aspect < @as(f32, @floatFromInt(h.*)) / @as(f32, @floatFromInt(w.*))) {
+                h.* = @intFromFloat(@as(f32, @floatFromInt(w.*)) * self.min_aspect + 0.5);
+            }
+        }
+        if (baseismin) {
+            w.* -= self.base_width;
+            h.* -= self.base_height;
+        }
+        if (self.inc_width != 0) w.* -= @mod(w.*, self.inc_width);
+        if (self.inc_height != 0) h.* -= @mod(h.*, self.inc_height);
+        w.* = @max(w.* + self.base_width, self.min_width);
+        h.* = @max(h.* + self.base_height, self.min_height);
+        if (self.max_width != 0) w.* = @min(w.*, self.max_width);
+        if (self.max_height != 0) h.* = @min(h.*, self.max_height);
+    }
+};
 
 // A Client represents a single managed window (X11 toplevel).
-// Also reused for system tray icons (which are embedded windows).
 pub const Client = struct {
     name: [256:0]u8 = [_:0]u8{0} ** 256, // window title (WM_NAME)
 
-    // ICCCM size-hint aspect ratios (min_aspect, max_aspect)
-    min_aspect: f32 = 0,
-    max_aspect: f32 = 0,
+    // ICCCM WM_NORMAL_HINTS — parsed size constraints (base, increment, min/max, aspect)
+    size_hints: SizeHints = .{},
 
     // Current geometry (position + size)
     x: c_int = 0,
@@ -45,16 +137,6 @@ pub const Client = struct {
     oldw: c_int = 0,
     oldh: c_int = 0,
 
-    // ICCCM size hints (see XSizeHints): base, increment, min, max dimensions
-    base_width: c_int = 0,
-    base_height: c_int = 0,
-    inc_width: c_int = 0, // resize step (e.g. terminal character width)
-    inc_height: c_int = 0, // resize step (e.g. terminal character height)
-    max_width: c_int = 0,
-    max_height: c_int = 0,
-    min_width: c_int = 0,
-    min_height: c_int = 0,
-
     border_width: c_int = 0, // current border thickness
     old_border_width: c_int = 0, // saved before fullscreen (which sets border to 0)
 
@@ -65,7 +147,6 @@ pub const Client = struct {
     neverfocus: bool = false, // true if client told us not to give it input focus
     was_floating: bool = false, // floating state before entering fullscreen
     isfullscreen: bool = false,
-    embed_state: EmbedState = .inactive, // XEMBED mapped state (only used for systray icons)
 
     next: ?*Client = null, // next in the per-monitor client list (creation order)
     snext: ?*Client = null, // next in the per-monitor focus stack (most-recently-focused order)
@@ -198,7 +279,7 @@ pub const Client = struct {
     pub fn applySizeHints(self: *Client, x: *c_int, y: *c_int, w: *c_int, h: *c_int, interact: bool) bool {
         const m = self.monitor orelse return false;
 
-        // set minimum possible
+        // clamp position so window stays on-screen / within work area
         w.* = @max(1, w.*);
         h.* = @max(1, h.*);
         if (interact) {
@@ -216,90 +297,16 @@ pub const Client = struct {
         if (w.* < bar.bar_height) w.* = bar.bar_height;
 
         if (config.resizehints or self.isfloating or (self.monitor != null and self.monitor.?.layout.arrange == null)) {
-            // ICCCM 4.1.2.3
-            const baseismin = self.base_width == self.min_width and self.base_height == self.min_height;
-            if (!baseismin) {
-                w.* -= self.base_width;
-                h.* -= self.base_height;
-            }
-            // adjust for aspect limits
-            if (self.min_aspect > 0 and self.max_aspect > 0) {
-                if (self.max_aspect < @as(f32, @floatFromInt(w.*)) / @as(f32, @floatFromInt(h.*))) {
-                    w.* = @intFromFloat(@as(f32, @floatFromInt(h.*)) * self.max_aspect + 0.5);
-                } else if (self.min_aspect < @as(f32, @floatFromInt(h.*)) / @as(f32, @floatFromInt(w.*))) {
-                    h.* = @intFromFloat(@as(f32, @floatFromInt(w.*)) * self.min_aspect + 0.5);
-                }
-            }
-            if (baseismin) {
-                w.* -= self.base_width;
-                h.* -= self.base_height;
-            }
-            // adjust for increment value
-            if (self.inc_width != 0) w.* -= @mod(w.*, self.inc_width);
-            if (self.inc_height != 0) h.* -= @mod(h.*, self.inc_height);
-            // restore base dimensions
-            w.* = @max(w.* + self.base_width, self.min_width);
-            h.* = @max(h.* + self.base_height, self.min_height);
-            if (self.max_width != 0) w.* = @min(w.*, self.max_width);
-            if (self.max_height != 0) h.* = @min(h.*, self.max_height);
+            self.size_hints.apply(w, h);
         }
         return x.* != self.x or y.* != self.y or w.* != self.w or h.* != self.h;
     }
 
     /// Reads ICCCM WM_NORMAL_HINTS (size hints) from the X server and stores
-    /// them in this Client struct. These hints define min/max size, aspect ratio,
-    /// resize increments, and base size — all used by applySizeHints to constrain
-    /// geometry. Also computes isfixed (whether min == max, meaning the window
-    /// can't be resized).
+    /// them in this Client's embedded SizeHints. Also sets isfixed (whether
+    /// min == max, meaning the window can't be resized).
     pub fn updateSizeHints(self: *Client) void {
-        const d = dwm.dpy orelse return;
-        var msize: c_long = undefined;
-        var size: x11.XSizeHints = std.mem.zeroes(x11.XSizeHints);
-        if (c.XGetWMNormalHints(d, self.window, &size, &msize) == 0) {
-            size.flags = x11.PSize;
-        }
-        if (size.flags & x11.PBaseSize != 0) {
-            self.base_width = @intCast(size.base_width);
-            self.base_height = @intCast(size.base_height);
-        } else if (size.flags & x11.PMinSize != 0) {
-            self.base_width = @intCast(size.min_width);
-            self.base_height = @intCast(size.min_height);
-        } else {
-            self.base_width = 0;
-            self.base_height = 0;
-        }
-        if (size.flags & x11.PResizeInc != 0) {
-            self.inc_width = @intCast(size.width_inc);
-            self.inc_height = @intCast(size.height_inc);
-        } else {
-            self.inc_width = 0;
-            self.inc_height = 0;
-        }
-        if (size.flags & x11.PMaxSize != 0) {
-            self.max_width = @intCast(size.max_width);
-            self.max_height = @intCast(size.max_height);
-        } else {
-            self.max_width = 0;
-            self.max_height = 0;
-        }
-        if (size.flags & x11.PMinSize != 0) {
-            self.min_width = @intCast(size.min_width);
-            self.min_height = @intCast(size.min_height);
-        } else if (size.flags & x11.PBaseSize != 0) {
-            self.min_width = @intCast(size.base_width);
-            self.min_height = @intCast(size.base_height);
-        } else {
-            self.min_width = 0;
-            self.min_height = 0;
-        }
-        if (size.flags & x11.PAspect != 0) {
-            self.min_aspect = @as(f32, @floatFromInt(size.min_aspect.y)) / @as(f32, @floatFromInt(size.min_aspect.x));
-            self.max_aspect = @as(f32, @floatFromInt(size.max_aspect.x)) / @as(f32, @floatFromInt(size.max_aspect.y));
-        } else {
-            self.min_aspect = 0.0;
-            self.max_aspect = 0.0;
-        }
-        self.isfixed = (self.max_width != 0 and self.max_height != 0 and self.max_width == self.min_width and self.max_height == self.min_height);
+        self.isfixed = self.size_hints.update(self.window);
     }
 
     /// Applies size hints and calls applyGeometry only if the geometry actually

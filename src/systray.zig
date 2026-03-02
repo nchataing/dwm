@@ -11,7 +11,54 @@ const drw = @import("drw.zig");
 const bar = @import("bar.zig");
 const config = @import("config.zig");
 const dwm = @import("dwm.zig");
+const client = @import("client.zig");
 const c = x11.c;
+
+const SizeHints = client.SizeHints;
+
+// XEMBED visibility state for system tray icons.
+pub const EmbedState = enum { inactive, active };
+
+// A TrayIcon represents a single embedded system tray applet window.
+// It only holds the fields actually needed by the systray subsystem,
+// keeping it decoupled from the full Client struct.
+pub const TrayIcon = struct {
+    window: x11.Window = 0, // the applet's X11 window id
+    monitor: ?*dwm.Monitor = null, // the monitor this icon is displayed on
+    next: ?*TrayIcon = null, // next icon in the linked list
+
+    // Current geometry (position + size within the tray container)
+    x: c_int = 0,
+    y: c_int = 0,
+    w: c_int = 0,
+    h: c_int = 0,
+
+    // ICCCM WM_NORMAL_HINTS — parsed size constraints
+    size_hints: SizeHints = .{},
+
+    border_width: c_int = 0,
+    embed_state: EmbedState = .inactive,
+
+    /// Sets the WM_STATE property on this icon's window.
+    pub fn setClientState(self: *TrayIcon, state: c_long) void {
+        const d = dwm.dpy orelse return;
+        const data = [2]c_long{ state, x11.None };
+        _ = c.XChangeProperty(d, self.window, dwm.wmatom[dwm.WMState], dwm.wmatom[dwm.WMState], 32, x11.PropModeReplace, @ptrCast(&data), 2);
+    }
+
+    /// Reads ICCCM WM_NORMAL_HINTS from the X server and stores them.
+    /// Used to constrain icon geometry via applySizeHints.
+    pub fn updateSizeHints(self: *TrayIcon) void {
+        _ = self.size_hints.update(self.window);
+    }
+
+    /// Constrains (w, h) to ICCCM size hints. Returns true if the result
+    /// differs from the icon's current size. Used by updatesystrayicongeom.
+    pub fn applySizeHints(self: *TrayIcon, w: *c_int, h: *c_int) bool {
+        self.size_hints.apply(w, h);
+        return w.* != self.w or h.* != self.h;
+    }
+};
 
 // --- XEMBED protocol constants (see freedesktop XEMBED spec) ---
 // These are used by the system tray to embed applet windows into the bar.
@@ -30,7 +77,7 @@ const alloc = std.heap.c_allocator;
 // (e.g. volume, network, bluetooth indicators) via the XEMBED protocol.
 pub const Systray = struct {
     win: x11.Window = 0, // the container window that holds all tray icons
-    icons: ?*dwm.Client = null, // linked list of embedded icon "clients"
+    icons: ?*TrayIcon = null, // linked list of embedded tray icons
 };
 
 /// The global system tray instance. Null until the first `update()` call
@@ -38,9 +85,9 @@ pub const Systray = struct {
 /// the public functions below.
 pub var ptr: ?*Systray = null;
 
-/// Finds a systray icon Client by its X window ID.
+/// Finds a systray icon by its X window ID.
 /// Returns null if the systray is disabled, the window is 0, or no match is found.
-pub fn wintosystrayicon(w: x11.Window) ?*dwm.Client {
+pub fn wintosystrayicon(w: x11.Window) ?*TrayIcon {
     if (w == 0) return null;
     const st = ptr orelse return null;
     var i = st.icons;
@@ -89,10 +136,10 @@ pub fn getsystraywidth() c_uint {
 }
 
 /// Unlinks a systray icon from the icon list and frees its memory.
-pub fn removesystrayicon(i: ?*dwm.Client) void {
+pub fn removesystrayicon(i: ?*TrayIcon) void {
     const icon = i orelse return;
     const st = ptr orelse return;
-    var ii: *?*dwm.Client = &st.icons;
+    var ii: *?*TrayIcon = &st.icons;
     while (ii.* != null) {
         if (ii.* == icon) {
             ii.* = icon.next;
@@ -116,7 +163,7 @@ pub fn resizebarwin(m: *dwm.Monitor) void {
 /// Scales a systray icon to fit the bar height, preserving aspect ratio.
 /// Icons that are square get bar_height x bar_height; non-square icons are
 /// scaled proportionally. Ensures no icon exceeds the bar height.
-pub fn updatesystrayicongeom(icon: *dwm.Client, w: c_int, h: c_int) void {
+pub fn updatesystrayicongeom(icon: *TrayIcon, w: c_int, h: c_int) void {
     icon.h = bar.bar_height;
     if (w == h) {
         icon.w = bar.bar_height;
@@ -125,7 +172,11 @@ pub fn updatesystrayicongeom(icon: *dwm.Client, w: c_int, h: c_int) void {
     } else {
         icon.w = @intFromFloat(@as(f32, @floatFromInt(bar.bar_height)) * (@as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(h))));
     }
-    _ = icon.applySizeHints(&icon.x, &icon.y, &icon.w, &icon.h, false);
+    var wv = icon.w;
+    var hv = icon.h;
+    _ = icon.applySizeHints(&wv, &hv);
+    icon.w = wv;
+    icon.h = hv;
     if (icon.h > bar.bar_height) {
         if (icon.w == icon.h) {
             icon.w = bar.bar_height;
@@ -139,9 +190,9 @@ pub fn updatesystrayicongeom(icon: *dwm.Client, w: c_int, h: c_int) void {
 /// Reacts to XEMBED_INFO property changes on a systray icon. Maps or unmaps
 /// the icon based on the XEMBED_MAPPED flag, and sends the appropriate
 /// XEMBED activate/deactivate message so the icon knows its visibility state.
-pub fn updatesystrayiconstate(icon: *dwm.Client, ev: *x11.XPropertyEvent) void {
+pub fn updatesystrayiconstate(icon: *TrayIcon, ev: *x11.XPropertyEvent) void {
     if (ev.atom != dwm.xatom[dwm.XembedInfo]) return;
-    const flags = dwm.getatomprop(icon, dwm.xatom[dwm.XembedInfo]);
+    const flags = getatomprop(icon, dwm.xatom[dwm.XembedInfo]);
     if (flags == 0) return;
 
     var code: c_long = 0;
@@ -161,6 +212,24 @@ pub fn updatesystrayiconstate(icon: *dwm.Client, ev: *x11.XPropertyEvent) void {
     if (ptr) |st| {
         _ = dwm.sendevent(icon.window, dwm.xatom[dwm.XembedAtom], x11.StructureNotifyMask, x11.CurrentTime, code, 0, @intCast(st.win), XEMBED_EMBEDDED_VERSION);
     }
+}
+
+/// Reads an Atom-typed XEMBED_INFO property from a tray icon window.
+/// Returns the flags field (second atom) which indicates mapped/unmapped state.
+fn getatomprop(icon: *TrayIcon, prop: x11.Atom) x11.Atom {
+    const d = dwm.dpy orelse return x11.None;
+    var di: c_int = undefined;
+    var dl: c_ulong = undefined;
+    var dl2: c_ulong = undefined;
+    var p: ?[*]u8 = null;
+    var da: x11.Atom = undefined;
+    var atom: x11.Atom = x11.None;
+    if (c.XGetWindowProperty(d, icon.window, prop, 0, @sizeOf(x11.Atom), x11.False, dwm.xatom[dwm.XembedInfo], &da, &di, &dl, &dl2, @ptrCast(&p)) == x11.Success and p != null) {
+        atom = @as(*x11.Atom, @ptrCast(@alignCast(p.?))).*;
+        if (da == dwm.xatom[dwm.XembedInfo] and dl == 2) atom = @as([*]x11.Atom, @ptrCast(@alignCast(p.?)))[1];
+        _ = c.XFree(p);
+    }
+    return atom;
 }
 
 /// Creates (if first call) or repositions/redraws the system tray window. On
@@ -254,18 +323,18 @@ pub fn cleanup() void {
     }
 }
 
-/// Handles a SYSTEM_TRAY_REQUEST_DOCK ClientMessage: creates a new icon Client,
+/// Handles a SYSTEM_TRAY_REQUEST_DOCK ClientMessage: creates a new TrayIcon,
 /// sets up its geometry and XEMBED properties, reparents it into the tray window,
 /// and refreshes the tray layout. Called from the clientmessage event handler.
 pub fn handleDockRequest(cme_window: c_long) void {
     const d = dwm.dpy orelse return;
     const st = ptr orelse return;
 
-    const icon = alloc.create(dwm.Client) catch {
-        dwm.die("fatal: could not allocate Client");
+    const icon = alloc.create(TrayIcon) catch {
+        dwm.die("fatal: could not allocate TrayIcon");
         return;
     };
-    icon.* = dwm.Client{};
+    icon.* = TrayIcon{};
     icon.window = @intCast(cme_window);
     if (icon.window == 0) {
         alloc.destroy(icon);
@@ -282,16 +351,10 @@ pub fn handleDockRequest(cme_window: c_long) void {
         wa.border_width = 0;
     }
     icon.x = 0;
-    icon.oldx = 0;
     icon.y = 0;
-    icon.oldy = 0;
     icon.w = wa.width;
-    icon.oldw = wa.width;
     icon.h = wa.height;
-    icon.oldh = wa.height;
-    icon.old_border_width = wa.border_width;
     icon.border_width = 0;
-    icon.isfloating = true;
     icon.embed_state = .active;
     icon.updateSizeHints();
     updatesystrayicongeom(icon, wa.width, wa.height);

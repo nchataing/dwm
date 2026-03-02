@@ -34,4 +34,12 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run dwm");
     run_step.dependOn(&run_cmd.step);
+
+    // Install to ~/.local/bin
+    const install_home_step = b.step("install-home", "Copy the executable to ~/.local/bin");
+    const home = b.graph.environ_map.get("HOME") orelse return;
+    const cp = b.addSystemCommand(&.{ "cp", "-f" });
+    cp.addArtifactArg(exe);
+    cp.addArg(b.fmt("{s}/.local/bin/,dwm", .{home}));
+    install_home_step.dependOn(&cp.step);
 }

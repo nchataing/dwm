@@ -17,6 +17,7 @@ const bar = @import("bar.zig");
 const client = @import("client.zig");
 const focus_mod = @import("focus.zig");
 const dwm = @import("dwm.zig");
+const status = @import("status.zig");
 const c = x11.c;
 
 const Client = dwm.Client;
@@ -177,15 +178,51 @@ fn initHandler() [x11.LASTEvent]?HandlerFn {
 
 // ── Main event loop ─────────────────────────────────────────────────────────
 
-/// The main event loop. Flushes pending requests, then blocks on XNextEvent
-/// and dispatches each event through the handler table until `running` is
-/// set to false (by quit() or a signal).
+/// The main event loop. Uses poll() to multiplex the X11 connection fd and the
+/// status timer fd. When the timer fires, we update the embedded status bar.
+/// When X11 events arrive, we drain them all via XPending/XNextEvent.
 pub fn run() void {
     const d = dwm.dpy orelse return;
     var ev: x11.XEvent = undefined;
     _ = c.XSync(d, x11.False);
-    while (dwm.running and c.XNextEvent(d, &ev) == 0) {
-        if (handler[@intCast(ev.type)]) |h| h(&ev);
+
+    status.init();
+    defer status.deinit();
+
+    // Do an initial status update immediately.
+    status.update();
+    bar.drawbars();
+
+    const x11_fd = c.XConnectionNumber(d);
+    const timer = status.fd();
+
+    const linux = std.os.linux;
+    const POLLIN: i16 = linux.POLL.IN;
+
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = x11_fd, .events = POLLIN, .revents = 0 },
+        .{ .fd = timer, .events = POLLIN, .revents = 0 },
+    };
+    const nfds: std.posix.nfds_t = if (timer >= 0) 2 else 1;
+
+    while (dwm.running) {
+        // Flush any pending outgoing X requests before blocking.
+        _ = c.XFlush(d);
+
+        _ = std.posix.poll(fds[0..nfds], -1) catch continue;
+
+        // Timer fired — update the status bar.
+        if (nfds > 1 and fds[1].revents & POLLIN != 0) {
+            status.acknowledge();
+            status.update();
+            if (dwm.selmon) |sm| bar.drawbar(sm);
+        }
+
+        // Drain all pending X11 events.
+        while (c.XPending(d) > 0) {
+            _ = c.XNextEvent(d, &ev);
+            if (handler[@intCast(ev.type)]) |h| h(&ev);
+        }
     }
 }
 
@@ -496,10 +533,10 @@ fn motionnotify(e: *x11.XEvent) void {
 }
 
 /// Handles PropertyNotify events — a window property changed. This is how we
-/// stay in sync with clients: we update the status text when the root window
-/// name changes (set by xsetroot/slstatus), re-read titles on WM_NAME changes,
-/// update floating state on WM_TRANSIENT_FOR changes, refresh size hints, and
-/// handle urgency flags from WM_HINTS. Also handles systray icon property changes.
+/// stay in sync with clients: re-read titles on WM_NAME changes, update
+/// floating state on WM_TRANSIENT_FOR changes, refresh size hints, and handle
+/// urgency flags from WM_HINTS. Also handles systray icon property changes.
+/// (Status text is now driven by the embedded status timer, not root WM_NAME.)
 fn propertynotify(e: *x11.XEvent) void {
     const d = dwm.dpy orelse return;
     const ev = &e.xproperty;
@@ -515,9 +552,7 @@ fn propertynotify(e: *x11.XEvent) void {
         systray.update();
     }
 
-    if (ev.window == dwm.root and ev.atom == x11.XA_WM_NAME) {
-        bar.updateStatus();
-    } else if (ev.state == x11.PropertyDelete) {
+    if (ev.state == x11.PropertyDelete) {
         return;
     } else if (dwm.wintoclient(ev.window)) |cl| {
         switch (ev.atom) {

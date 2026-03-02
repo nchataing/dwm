@@ -2,12 +2,13 @@
 //!
 //! Draws the tag labels, layout symbol, window title, and status text
 //! into each monitor's bar window. Also handles bar window creation and
-//! status text updates from external tools (slstatus/xsetroot).
+//! status text updates via the embedded status module (status.zig).
 
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
 const systray = @import("systray.zig");
+const status = @import("status.zig");
 const dwm = @import("dwm.zig");
 const c = x11.c;
 
@@ -18,7 +19,7 @@ pub const tags = [_][*:0]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" }
 
 // ── Bar state ───────────────────────────────────────────────────────────────
 
-pub var status_text: [256:0]u8 = [_:0]u8{0} ** 256; // root window name, shown in the bar's status area
+pub var status_text: [256:0]u8 = [_:0]u8{0} ** 256; // status text, populated by the embedded status module
 pub var bar_height: c_int = 0; // height of the status bar (font height + 2)
 pub var text_lr_pad: c_int = 0; // left+right padding for text drawn in the bar
 pub var layout_label_width: c_int = 0; // width of the layout symbol text in the bar
@@ -128,15 +129,10 @@ pub fn updateBars() void {
     }
 }
 
-/// Reads the root window's WM_NAME property as the status bar text. External
-/// tools like slstatus/xsetroot set this property, and we display it in the
-/// bar's status area. Falls back to "dwm-VERSION" if no name is set.
+/// Updates the status bar text from the embedded status module and redraws.
+/// Called on timer ticks from the event loop, and once during initial setup.
 pub fn updateStatus() void {
-    if (!dwm.gettextprop(dwm.root, x11.XA_WM_NAME, &status_text)) {
-        const default_status = "dwm-" ++ dwm.VERSION;
-        @memcpy(status_text[0..default_status.len], default_status);
-        status_text[default_status.len] = 0;
-    }
+    status.update();
     if (dwm.selmon) |sm| drawbar(sm);
     systray.update();
 }

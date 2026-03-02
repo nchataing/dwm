@@ -368,6 +368,68 @@ pub const Monitor = struct {
 
     barwin: x11.Window = 0, // the X11 window used for the status bar
     lt: [2]*const config.Layout = undefined, // two remembered layouts (toggle with setlayout)
+
+    /// Allocates and initializes a new Monitor with config defaults.
+    pub fn create() ?*Monitor {
+        const m = alloc.create(Monitor) catch return null;
+        m.* = Monitor{};
+        m.tagset = .{ 1, 1 };
+        m.master_factor = config.master_factor;
+        m.num_masters = config.num_masters;
+        m.showbar = config.showbar;
+        m.topbar = config.topbar;
+        m.lt[0] = &config.layouts[0];
+        m.lt[1] = &config.layouts[1 % config.layouts.len];
+        const sym = std.mem.span(config.layouts[0].symbol);
+        @memcpy(m.layout_symbol[0..sym.len], sym);
+        return m;
+    }
+
+    /// Removes this monitor from the global list, destroys its bar window, and frees it.
+    pub fn destroy(self: *Monitor) void {
+        const d = dpy orelse return;
+        if (self == mons) {
+            mons = mons.?.next;
+        } else {
+            var m = mons;
+            while (m) |mm| : (m = mm.next) {
+                if (mm.next == self) {
+                    mm.next = self.next;
+                    break;
+                }
+            }
+        }
+        _ = c.XUnmapWindow(d, self.barwin);
+        _ = c.XDestroyWindow(d, self.barwin);
+        alloc.destroy(self);
+    }
+
+    /// Calculates bar Y position and adjusts the usable window area to exclude the bar.
+    pub fn updateBarPos(self: *Monitor) void {
+        self.window_y = self.monitor_y;
+        self.window_h = self.monitor_h;
+        if (self.showbar) {
+            self.window_h -= bar_height;
+            self.bar_y = if (self.topbar) self.window_y else self.window_y + self.window_h;
+            self.window_y = if (self.topbar) self.window_y + bar_height else self.window_y;
+        } else {
+            self.bar_y = -bar_height;
+        }
+    }
+
+    /// Returns the area of intersection between a rectangle and this monitor's window area.
+    pub fn intersect(self: *Monitor, x: c_int, y: c_int, w: c_int, h: c_int) c_int {
+        return @max(0, @min(x + w, self.window_x + self.window_w) - @max(x, self.window_x)) *
+            @max(0, @min(y + h, self.window_y + self.window_h) - @max(y, self.window_y));
+    }
+
+    /// Updates the layout symbol and invokes the current layout's arrange function.
+    pub fn applyLayout(self: *Monitor) void {
+        const sym = std.mem.span(self.lt[self.selected_layout].symbol);
+        @memcpy(self.layout_symbol[0..sym.len], sym);
+        if (sym.len < self.layout_symbol.len) self.layout_symbol[sym.len] = 0;
+        if (self.lt[self.selected_layout].arrange) |arrange_fn| arrange_fn(self);
+    }
 };
 
 // --- Global state ---
@@ -426,13 +488,6 @@ pub fn TEXTW(x: [*:0]const u8) c_int {
         return @as(c_int, @intCast(d.fontsetGetWidth(x))) + text_lr_pad;
     }
     return 0;
-}
-
-/// Compute the area (in pixels²) of the overlap between a rectangle and a monitor's
-/// window area. Used by recttomon() to determine which monitor a window belongs to.
-fn INTERSECT(x: c_int, y: c_int, w: c_int, h: c_int, m: *Monitor) c_int {
-    return @max(0, @min(x + w, m.window_x + m.window_w) - @max(x, m.window_x)) *
-        @max(0, @min(y + h, m.window_y + m.window_h) - @max(y, m.window_y));
 }
 
 // --- Event handler dispatch table ---
@@ -525,21 +580,12 @@ fn arrange(m: ?*Monitor) void {
         while (it) |mon| : (it = mon.next) showhide(mon.stack);
     }
     if (m) |mon| {
-        arrangemon(mon);
+        mon.applyLayout();
         restack(mon);
     } else {
         var it = mons;
-        while (it) |mon| : (it = mon.next) arrangemon(mon);
+        while (it) |mon| : (it = mon.next) mon.applyLayout();
     }
-}
-
-/// Updates the layout symbol shown in the bar (e.g. "[]=", "[M]") and calls the
-/// active layout's arrange function to position tiled clients on this monitor.
-fn arrangemon(m: *Monitor) void {
-    const sym = std.mem.span(m.lt[m.selected_layout].symbol);
-    @memcpy(m.layout_symbol[0..sym.len], sym);
-    if (sym.len < m.layout_symbol.len) m.layout_symbol[sym.len] = 0;
-    if (m.lt[m.selected_layout].arrange) |arrange_fn| arrange_fn(m);
 }
 
 /// X11 ButtonPress event handler. Determines which region of the bar was clicked
@@ -627,7 +673,7 @@ pub fn cleanup() void {
         while (mon.stack) |s| unmanage(s, false);
     }
     _ = c.XUngrabKey(d, x11.AnyKey, x11.AnyModifier, root);
-    while (mons != null) cleanupmon(mons.?);
+    while (mons != null) mons.?.destroy();
 
     if (config.showsystray) {
         systray.cleanup();
@@ -644,26 +690,6 @@ pub fn cleanup() void {
     _ = c.XSync(d, x11.False);
     _ = c.XSetInputFocus(d, x11.PointerRoot, x11.RevertToPointerRoot, x11.CurrentTime);
     _ = c.XDeleteProperty(d, root, netatom[NetActiveWindow]);
-}
-
-/// Removes a monitor from the linked list and destroys its bar window.
-/// Called when Xinerama reports fewer screens than before, or during cleanup.
-fn cleanupmon(mon: *Monitor) void {
-    const d = dpy orelse return;
-    if (mon == mons) {
-        mons = mons.?.next;
-    } else {
-        var m = mons;
-        while (m) |mm| : (m = mm.next) {
-            if (mm.next == mon) {
-                mm.next = mon.next;
-                break;
-            }
-        }
-    }
-    _ = c.XUnmapWindow(d, mon.barwin);
-    _ = c.XDestroyWindow(d, mon.barwin);
-    alloc.destroy(mon);
 }
 
 /// Handles X11 ClientMessage events, which are how clients (and the system tray)
@@ -785,23 +811,6 @@ fn configurerequest(e: *x11.XEvent) void {
 }
 
 /// Allocates and initializes a new Monitor with defaults from config.zig.
-/// Each monitor gets its own tagset, master_factor, layout pair, etc. —
-/// this is what enables per-monitor configuration in multi-head setups.
-fn createmon() ?*Monitor {
-    const m = alloc.create(Monitor) catch return null;
-    m.* = Monitor{};
-    m.tagset = .{ 1, 1 };
-    m.master_factor = config.master_factor;
-    m.num_masters = config.num_masters;
-    m.showbar = config.showbar;
-    m.topbar = config.topbar;
-    m.lt[0] = &config.layouts[0];
-    m.lt[1] = &config.layouts[1 % config.layouts.len];
-    const sym = std.mem.span(config.layouts[0].symbol);
-    @memcpy(m.layout_symbol[0..sym.len], sym);
-    return m;
-}
-
 /// Handles DestroyNotify — a window was destroyed by its owner. We unmanage
 /// the client (or remove the systray icon) so the WM stops tracking it.
 fn destroynotify(e: *x11.XEvent) void {
@@ -1523,7 +1532,7 @@ fn recttomon(x: c_int, y: c_int, w: c_int, h: c_int) ?*Monitor {
     var area: c_int = 0;
     var m = mons;
     while (m) |mon| : (m = mon.next) {
-        const a = INTERSECT(x, y, w, h, mon);
+        const a = mon.intersect(x, y, w, h);
         if (a > area) {
             area = a;
             r = mon;
@@ -2072,7 +2081,7 @@ pub fn togglebar(_: *const config.Arg) void {
     const d = dpy orelse return;
     const sm = selmon orelse return;
     sm.showbar = !sm.showbar;
-    updatebarpos(sm);
+    sm.updateBarPos();
     systray.resizebarwin(sm);
     if (config.showsystray) {
         if (systray.ptr) |st| {
@@ -2217,22 +2226,6 @@ fn updatebars() void {
     }
 }
 
-/// Calculates the bar's Y position and adjusts the usable window area on a
-/// monitor. When the bar is visible, it subtracts bar_height from the window
-/// area (from top or bottom depending on topbar). When hidden, the bar is
-/// placed off-screen at -bar_height.
-fn updatebarpos(m: *Monitor) void {
-    m.window_y = m.monitor_y;
-    m.window_h = m.monitor_h;
-    if (m.showbar) {
-        m.window_h -= bar_height;
-        m.bar_y = if (m.topbar) m.window_y else m.window_y + m.window_h;
-        m.window_y = if (m.topbar) m.window_y + bar_height else m.window_y;
-    } else {
-        m.bar_y = -bar_height;
-    }
-}
-
 /// Rebuilds the _NET_CLIENT_LIST property on the root window by iterating
 /// all clients across all monitors. EWMH pagers and taskbars use this to
 /// know which windows exist. Called after manage/unmanage.
@@ -2285,9 +2278,9 @@ fn updategeom() bool {
                 var m = mons;
                 while (m != null and m.?.next != null) m = m.?.next;
                 if (m) |mm| {
-                    mm.next = createmon();
+                    mm.next = Monitor.create();
                 } else {
-                    mons = createmon();
+                    mons = Monitor.create();
                 }
             }
             i = 0;
@@ -2311,7 +2304,7 @@ fn updategeom() bool {
                     mm.window_w = mm.monitor_w;
                     mm.monitor_h = unique_ptr[ui].height;
                     mm.window_h = mm.monitor_h;
-                    updatebarpos(mm);
+                    mm.updateBarPos();
                 }
             }
         } else {
@@ -2333,14 +2326,14 @@ fn updategeom() bool {
                         }
                     }
                     if (mm == selmon) selmon = mons;
-                    cleanupmon(mm);
+                    mm.destroy();
                 }
             }
         }
         std.c.free(unique_ptr);
     } else {
         // default monitor setup
-        if (mons == null) mons = createmon();
+        if (mons == null) mons = Monitor.create();
         if (mons) |m| {
             if (m.monitor_w != screen_width or m.monitor_h != screen_height) {
                 dirty = true;
@@ -2348,7 +2341,7 @@ fn updategeom() bool {
                 m.window_w = screen_width;
                 m.monitor_h = screen_height;
                 m.window_h = screen_height;
-                updatebarpos(m);
+                m.updateBarPos();
             }
         }
     }

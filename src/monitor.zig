@@ -7,6 +7,8 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const config = @import("config.zig");
+const layout = @import("layout.zig");
+const bar = @import("bar.zig");
 const dwm = @import("dwm.zig");
 const c = x11.c;
 
@@ -33,7 +35,6 @@ pub const Monitor = struct {
     window_h: c_int = 0,
 
     tag: u5 = 0, // index of the currently viewed tag (0..8)
-    selected_layout: c_uint = 0, // index (0 or 1) into lt[] for the active layout
     showbar: bool = true,
     topbar: bool = true,
 
@@ -43,7 +44,7 @@ pub const Monitor = struct {
     next: ?*Monitor = null, // next monitor in the global linked list
 
     barwin: x11.Window = 0, // the X11 window used for the status bar
-    lt: [2]*const config.Layout = undefined, // two remembered layouts (toggle with setlayout)
+    layout: *const layout.Layout = &layout.layouts[0], // active layout algorithm
 
     /// Allocates and initializes a new Monitor with config defaults.
     pub fn create() ?*Monitor {
@@ -52,9 +53,8 @@ pub const Monitor = struct {
         m.master_factor = config.master_factor;
         m.showbar = config.showbar;
         m.topbar = config.topbar;
-        m.lt[0] = &config.layouts[0];
-        m.lt[1] = &config.layouts[1 % config.layouts.len];
-        const sym = std.mem.span(config.layouts[0].symbol);
+        m.layout = &layout.layouts[0];
+        const sym = std.mem.span(layout.layouts[0].symbol);
         @memcpy(m.layout_symbol[0..sym.len], sym);
         return m;
     }
@@ -83,11 +83,11 @@ pub const Monitor = struct {
         self.window_y = self.monitor_y;
         self.window_h = self.monitor_h;
         if (self.showbar) {
-            self.window_h -= dwm.bar_height;
+            self.window_h -= bar.bar_height;
             self.bar_y = if (self.topbar) self.window_y else self.window_y + self.window_h;
-            self.window_y = if (self.topbar) self.window_y + dwm.bar_height else self.window_y;
+            self.window_y = if (self.topbar) self.window_y + bar.bar_height else self.window_y;
         } else {
-            self.bar_y = -dwm.bar_height;
+            self.bar_y = -bar.bar_height;
         }
     }
 
@@ -99,10 +99,10 @@ pub const Monitor = struct {
 
     /// Updates the layout symbol and invokes the current layout's arrange function.
     pub fn applyLayout(self: *Monitor) void {
-        const sym = std.mem.span(self.lt[self.selected_layout].symbol);
+        const sym = std.mem.span(self.layout.symbol);
         @memcpy(self.layout_symbol[0..sym.len], sym);
         if (sym.len < self.layout_symbol.len) self.layout_symbol[sym.len] = 0;
-        if (self.lt[self.selected_layout].arrange) |arrange_fn| arrange_fn(self);
+        if (self.layout.arrange) |arrange_fn| arrange_fn(self);
     }
 };
 

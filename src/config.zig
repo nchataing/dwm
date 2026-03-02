@@ -3,6 +3,7 @@
 /// After changes, rebuild with `zig build` and restart dwm (Mod+Shift+E).
 const x11 = @import("x11.zig");
 const dwm = @import("dwm.zig");
+const layout = @import("layout.zig");
 
 // ── Appearance ──────────────────────────────────────────────────────────────
 pub const borderpx: c_uint = 1; // border pixel of windows
@@ -60,19 +61,6 @@ pub const rules = [_]Rule{
 pub const master_factor: f32 = 0.6; // fraction of screen width given to master area [0.05..0.95]
 pub const resizehints: bool = false; // true means respect size hints in tiled resizals (can cause gaps)
 pub const lockfullscreen: bool = true; // true will force focus on the fullscreen window
-
-// Available layout algorithms. The first entry is the default.
-// symbol is shown in the bar; arrange=null means floating (no automatic positioning).
-pub const Layout = struct {
-    symbol: [*:0]const u8,
-    arrange: ?*const fn (*dwm.Monitor) void,
-};
-
-pub const layouts = [_]Layout{
-    .{ .symbol = "[]=", .arrange = &dwm.tile }, // first entry is default
-    .{ .symbol = "><>", .arrange = null }, // no layout function means floating behavior
-    .{ .symbol = "[M]", .arrange = &dwm.monocle },
-};
 
 // ── Key definitions ─────────────────────────────────────────────────────────
 // MODKEY is the modifier key used for all dwm keybindings (Mod4 = Super/Win key).
@@ -146,10 +134,9 @@ pub const keys = [_]Key{
     .{ .mod = MODKEY, .keysym = x11.XK_l, .func = &dwm.setmfact, .arg = .{ .f = 0.05 } },
     .{ .mod = MODKEY, .keysym = x11.XK_Return, .func = &dwm.zoom, .arg = .{ .i = 0 } },
     .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_q, .func = &dwm.killclient, .arg = .{ .i = 0 } },
-    .{ .mod = MODKEY, .keysym = x11.XK_t, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layouts[0]) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_f, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layouts[1]) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_m, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layouts[2]) } },
-    .{ .mod = MODKEY, .keysym = x11.XK_space, .func = &dwm.setlayout, .arg = .{ .v = null } },
+    .{ .mod = MODKEY, .keysym = x11.XK_t, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layout.layouts[0]) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_f, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layout.layouts[1]) } },
+    .{ .mod = MODKEY, .keysym = x11.XK_m, .func = &dwm.setlayout, .arg = .{ .v = @ptrCast(&layout.layouts[2]) } },
     .{ .mod = MODKEY | x11.ShiftMask, .keysym = x11.XK_space, .func = &dwm.togglefloating, .arg = .{ .i = 0 } },
     .{ .mod = MODKEY, .keysym = x11.XK_comma, .func = &dwm.focusmon, .arg = .{ .i = -1 } },
     .{ .mod = MODKEY, .keysym = x11.XK_period, .func = &dwm.focusmon, .arg = .{ .i = 1 } },

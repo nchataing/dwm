@@ -8,6 +8,7 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
+const bar = @import("bar.zig");
 const config = @import("config.zig");
 const dwm = @import("dwm.zig");
 const c = x11.c;
@@ -109,29 +110,29 @@ pub fn resizebarwin(m: *dwm.Monitor) void {
     var w: c_uint = @intCast(m.window_w);
     if (systraytomon(m) == m and !config.systrayonleft)
         w -= getsystraywidth();
-    _ = c.XMoveResizeWindow(d, m.barwin, m.window_x, m.bar_y, w, @intCast(dwm.bar_height));
+    _ = c.XMoveResizeWindow(d, m.barwin, m.window_x, m.bar_y, w, @intCast(bar.bar_height));
 }
 
 /// Scales a systray icon to fit the bar height, preserving aspect ratio.
 /// Icons that are square get bar_height x bar_height; non-square icons are
 /// scaled proportionally. Ensures no icon exceeds the bar height.
 pub fn updatesystrayicongeom(icon: *dwm.Client, w: c_int, h: c_int) void {
-    icon.h = dwm.bar_height;
+    icon.h = bar.bar_height;
     if (w == h) {
-        icon.w = dwm.bar_height;
-    } else if (h == dwm.bar_height) {
+        icon.w = bar.bar_height;
+    } else if (h == bar.bar_height) {
         icon.w = w;
     } else {
-        icon.w = @intFromFloat(@as(f32, @floatFromInt(dwm.bar_height)) * (@as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(h))));
+        icon.w = @intFromFloat(@as(f32, @floatFromInt(bar.bar_height)) * (@as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(h))));
     }
     _ = icon.applySizeHints(&icon.x, &icon.y, &icon.w, &icon.h, false);
-    if (icon.h > dwm.bar_height) {
+    if (icon.h > bar.bar_height) {
         if (icon.w == icon.h) {
-            icon.w = dwm.bar_height;
+            icon.w = bar.bar_height;
         } else {
-            icon.w = @intFromFloat(@as(f32, @floatFromInt(dwm.bar_height)) * (@as(f32, @floatFromInt(icon.w)) / @as(f32, @floatFromInt(icon.h))));
+            icon.w = @intFromFloat(@as(f32, @floatFromInt(bar.bar_height)) * (@as(f32, @floatFromInt(icon.w)) / @as(f32, @floatFromInt(icon.h))));
         }
-        icon.h = dwm.bar_height;
+        icon.h = bar.bar_height;
     }
 }
 
@@ -173,10 +174,10 @@ pub fn update() void {
 
     const m = systraytomon(null) orelse return;
     var x_pos: c_int = m.monitor_x + m.monitor_w;
-    const status_w = dwm.TEXTW(&dwm.status_text) - dwm.text_lr_pad + @as(c_int, @intCast(config.systrayspacing));
+    const status_w = bar.textWidth(&bar.status_text) - bar.text_lr_pad + @as(c_int, @intCast(config.systrayspacing));
     var w: c_uint = 1;
 
-    if (config.systrayonleft) x_pos -= status_w + @divTrunc(dwm.text_lr_pad, 2);
+    if (config.systrayonleft) x_pos -= status_w + @divTrunc(bar.text_lr_pad, 2);
 
     if (ptr == null) {
         // init systray
@@ -186,7 +187,7 @@ pub fn update() void {
         };
         st.* = Systray{};
         ptr = st;
-        st.win = c.XCreateSimpleWindow(d, dwm.root, x_pos, m.bar_y, w, @intCast(dwm.bar_height), 0, 0, s[dwm.SchemeSel][drw.ColBg].pixel);
+        st.win = c.XCreateSimpleWindow(d, dwm.root, x_pos, m.bar_y, w, @intCast(bar.bar_height), 0, 0, s[dwm.SchemeSel][drw.ColBg].pixel);
         var wa: x11.XSetWindowAttributes = std.mem.zeroes(x11.XSetWindowAttributes);
         wa.event_mask = x11.ButtonPressMask | x11.ExposureMask;
         wa.override_redirect = x11.True;
@@ -223,12 +224,12 @@ pub fn update() void {
     }
     w = if (w != 0) w + config.systrayspacing else 1;
     x_pos -= @intCast(w);
-    _ = c.XMoveResizeWindow(d, st.win, x_pos, m.bar_y, w, @intCast(dwm.bar_height));
+    _ = c.XMoveResizeWindow(d, st.win, x_pos, m.bar_y, w, @intCast(bar.bar_height));
     var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
     wc.x = x_pos;
     wc.y = m.bar_y;
     wc.width = @intCast(w);
-    wc.height = dwm.bar_height;
+    wc.height = bar.bar_height;
     wc.stack_mode = x11.Above;
     wc.sibling = m.barwin;
     _ = c.XConfigureWindow(d, st.win, x11.CWX | x11.CWY | x11.CWWidth | x11.CWHeight | x11.CWSibling | x11.CWStackMode, &wc);
@@ -236,7 +237,7 @@ pub fn update() void {
     _ = c.XMapSubwindows(d, st.win);
     if (dwm.draw) |dr| {
         _ = c.XSetForeground(d, dr.gc, s[dwm.SchemeNorm][drw.ColBg].pixel);
-        _ = c.XFillRectangle(d, st.win, dr.gc, 0, 0, w, @intCast(dwm.bar_height));
+        _ = c.XFillRectangle(d, st.win, dr.gc, 0, 0, w, @intCast(bar.bar_height));
     }
     _ = c.XSync(d, x11.False);
 }
@@ -276,8 +277,8 @@ pub fn handleDockRequest(cme_window: c_long) void {
 
     var wa: x11.XWindowAttributes = undefined;
     if (c.XGetWindowAttributes(d, icon.window, &wa) == 0) {
-        wa.width = @intCast(dwm.bar_height);
-        wa.height = @intCast(dwm.bar_height);
+        wa.width = @intCast(bar.bar_height);
+        wa.height = @intCast(bar.bar_height);
         wa.border_width = 0;
     }
     icon.x = 0;

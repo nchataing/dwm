@@ -2,9 +2,9 @@
 // See LICENSE file for copyright and license details.
 //
 // This is the core of the window manager. It handles all X11 events, manages
-// client windows across monitors, draws the status bar, and implements the
-// tiling/floating/monocle layouts. Most functions here correspond 1:1 with
-// the original dwm.c from suckless.
+// client windows across monitors, and draws the status bar. Layout algorithms
+// live in layout.zig. Most functions here correspond 1:1 with the original
+// dwm.c from suckless.
 const std = @import("std");
 const x11 = @import("x11.zig");
 const drw = @import("drw.zig");
@@ -12,12 +12,14 @@ const config = @import("config.zig");
 const systray = @import("systray.zig");
 const xerror = @import("xerror.zig");
 const monitor = @import("monitor.zig");
+const layout = @import("layout.zig");
+const bar = @import("bar.zig");
 const c = x11.c;
 
-const VERSION = "6.3";
+pub const VERSION = "6.3";
 
 // --- Cursor indices into the global cursor array ---
-const CurNormal = 0; // default pointer (arrow)
+pub const CurNormal = 0; // default pointer (arrow)
 const CurResize = 1; // shown while resizing a window
 const CurMove = 2; // shown while moving a window
 const CurLast = 3; // total count (used to size the array)
@@ -249,10 +251,10 @@ pub const Client = struct {
             if (x.* + w.* + 2 * self.border_width <= m.window_x) x.* = m.window_x;
             if (y.* + h.* + 2 * self.border_width <= m.window_y) y.* = m.window_y;
         }
-        if (h.* < bar_height) h.* = bar_height;
-        if (w.* < bar_height) w.* = bar_height;
+        if (h.* < bar.bar_height) h.* = bar.bar_height;
+        if (w.* < bar.bar_height) w.* = bar.bar_height;
 
-        if (config.resizehints or self.isfloating or (self.monitor != null and self.monitor.?.lt[self.monitor.?.selected_layout].arrange == null)) {
+        if (config.resizehints or self.isfloating or (self.monitor != null and self.monitor.?.layout.arrange == null)) {
             // ICCCM 4.1.2.3
             const baseismin = self.base_width == self.min_width and self.base_height == self.min_height;
             if (!baseismin) {
@@ -341,18 +343,15 @@ pub const Client = struct {
 };
 
 pub const Monitor = monitor.Monitor;
+pub const Layout = layout.Layout;
 
 // --- Global state ---
 // These mirror the globals from the original dwm.c. They are set once during
 // setup() and then read/written throughout the event loop.
 const broken: [*:0]const u8 = "broken"; // fallback window title when WM_NAME is empty
-pub var status_text: [256:0]u8 = [_:0]u8{0} ** 256; // root window name, shown in the bar's status area
 pub var screen: c_int = 0; // default X screen number
 pub var screen_width: c_int = 0; // total screen width in pixels
 pub var screen_height: c_int = 0; // total screen height in pixels
-pub var bar_height: c_int = 0; // height of the status bar (font height + 2)
-var layout_label_width: c_int = 0; // width of the layout symbol text in the bar
-pub var text_lr_pad: c_int = 0; // left+right padding for text drawn in the bar
 var numlockmask: c_uint = 0; // dynamically determined NumLock modifier mask
 pub var wmatom: [WMLast]x11.Atom = [_]x11.Atom{0} ** WMLast; // ICCCM atoms
 pub var netatom: [NetLast]x11.Atom = [_]x11.Atom{0} ** NetLast; // EWMH atoms
@@ -389,14 +388,6 @@ fn CLEANMASK(mask: c_uint) c_uint {
 /// Event mask for grabbing mouse motion (used during move/resize drag operations).
 fn MOUSEMASK() c_long {
     return BUTTONMASK() | x11.PointerMotionMask;
-}
-
-/// Measure the pixel width of a text string, including left+right padding.
-pub fn TEXTW(x: [*:0]const u8) c_int {
-    if (draw) |d| {
-        return @as(c_int, @intCast(d.fontsetGetWidth(x))) + text_lr_pad;
-    }
-    return 0;
 }
 
 // --- Event handler dispatch table ---
@@ -477,26 +468,6 @@ fn cstrstr(haystack: [*:0]const u8, needle: [*:0]const u8) bool {
     return std.mem.indexOf(u8, h, n) != null;
 }
 
-/// Triggers a full layout recalculation. If a specific monitor is given, only that
-/// monitor is re-laid-out; if null, all monitors are updated. This is the main
-/// entry point called after any state change that affects window positions (tag
-/// switches, client add/remove, layout changes, etc.).
-fn arrange(m: ?*Monitor) void {
-    if (m) |mon| {
-        showhide(mon.stack);
-    } else {
-        var it = mons;
-        while (it) |mon| : (it = mon.next) showhide(mon.stack);
-    }
-    if (m) |mon| {
-        mon.applyLayout();
-        restack(mon);
-    } else {
-        var it = mons;
-        while (it) |mon| : (it = mon.next) mon.applyLayout();
-    }
-}
-
 /// X11 ButtonPress event handler. Determines which region of the bar was clicked
 /// (tag label, layout symbol, window title, status text) or whether a client
 /// window was clicked, then dispatches the matching action from config.buttons.
@@ -522,16 +493,16 @@ fn buttonpress(e: *x11.XEvent) void {
         var i: usize = 0;
         var x: c_int = 0;
         while (true) {
-            x += TEXTW(config.tags[i]);
+            x += bar.textWidth(config.tags[i]);
             if (ev.x < x or i + 1 >= config.tags.len) break;
             i += 1;
         }
         if (i < config.tags.len and ev.x < x) {
             click = config.ClkTagBar;
             arg = .{ .ui = @intCast(i) };
-        } else if (ev.x < x + layout_label_width) {
+        } else if (ev.x < x + bar.layout_label_width) {
             click = config.ClkLtSymbol;
-        } else if (ev.x > sm.window_w - TEXTW(&status_text) - @as(c_int, @intCast(systray.getsystraywidth()))) {
+        } else if (ev.x > sm.window_w - bar.textWidth(&bar.status_text) - @as(c_int, @intCast(systray.getsystraywidth()))) {
             click = config.ClkStatusText;
         } else {
             click = config.ClkWinTitle;
@@ -576,7 +547,7 @@ pub fn cleanup() void {
     const d = dpy orelse return;
     const a = config.Arg{ .ui = @as(c_uint, @bitCast(@as(c_int, -1))) };
     view(&a);
-    if (selmon) |sm| sm.lt[sm.selected_layout] = &config.Layout{ .symbol = "", .arrange = null };
+    if (selmon) |sm| sm.layout = &layout.Layout{ .symbol = "", .arrange = null };
     var m = mons;
     while (m) |mon| : (m = mon.next) {
         while (mon.stack) |s| unmanage(s, false);
@@ -644,8 +615,8 @@ fn configurenotify(e: *x11.XEvent) void {
         screen_width = ev.width;
         screen_height = ev.height;
         if (monitor.updateGeometry() or dirty) {
-            if (draw) |dr| dr.resize(@intCast(screen_width), @intCast(bar_height));
-            updatebars();
+            if (draw) |dr| dr.resize(@intCast(screen_width), @intCast(bar.bar_height));
+            bar.updateBars();
             var m = mons;
             while (m) |mon| : (m = mon.next) {
                 var cl_it = mon.clients;
@@ -655,7 +626,7 @@ fn configurenotify(e: *x11.XEvent) void {
                 systray.resizebarwin(mon);
             }
             focus(null);
-            arrange(null);
+            layout.arrange(null);
         }
     }
     _ = d;
@@ -672,7 +643,7 @@ fn configurerequest(e: *x11.XEvent) void {
     if (wintoclient(ev.window)) |cl| {
         if (ev.value_mask & x11.CWBorderWidth != 0) {
             cl.border_width = ev.border_width;
-        } else if (cl.isfloating or (selmon != null and selmon.?.lt[selmon.?.selected_layout].arrange == null)) {
+        } else if (cl.isfloating or (selmon != null and selmon.?.layout.arrange == null)) {
             const m = cl.monitor orelse return;
             if (ev.value_mask & x11.CWX != 0) {
                 cl.oldx = cl.x;
@@ -729,77 +700,6 @@ fn destroynotify(e: *x11.XEvent) void {
     }
 }
 
-/// Renders the entire status bar for one monitor: tag indicators (with
-/// occupancy dots and urgency highlighting), the layout symbol, the focused
-/// window's title, and the root window name as status text. The bar is drawn
-/// to an off-screen pixmap first, then blitted to the bar window to avoid flicker.
-fn drawbar(m: *Monitor) void {
-    const d = draw orelse return;
-    const s = scheme orelse return;
-    if (!m.showbar) return;
-
-    var stw: c_uint = 0;
-    if (systray.systraytomon(m) == m and !config.systrayonleft)
-        stw = systray.getsystraywidth();
-
-    // draw status first
-    var tw: c_int = 0;
-    if (selmon == m) {
-        d.setScheme(s[SchemeNorm]);
-        tw = TEXTW(&status_text) - @divTrunc(text_lr_pad, 2) + 2;
-        _ = d.text(m.window_w - tw - @as(c_int, @intCast(stw)), 0, @intCast(tw), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2) - 2), &status_text, false);
-    }
-
-    systray.resizebarwin(m);
-
-    var occ = [_]bool{false} ** config.tags.len; // which tags have clients
-    var urg = [_]bool{false} ** config.tags.len; // which tags have urgent clients
-    var cl_it = m.clients;
-    while (cl_it) |cl_c| : (cl_it = cl_c.next) {
-        occ[cl_c.tag] = true;
-        if (cl_c.isurgent) urg[cl_c.tag] = true;
-    }
-
-    var x: c_int = 0;
-    const boxs = @divTrunc(@as(c_int, @intCast(d.fonts.?.h)), 9);
-    const boxw = @divTrunc(@as(c_int, @intCast(d.fonts.?.h)), 6) + 2;
-
-    for (0..config.tags.len) |i| {
-        const w = TEXTW(config.tags[i]);
-        d.setScheme(if (m.tag == i) s[SchemeSel] else s[SchemeNorm]);
-        _ = d.text(x, 0, @intCast(w), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), config.tags[i], urg[i]);
-        if (occ[i]) {
-            d.rect(x + boxs, boxs, @intCast(boxw), @intCast(boxw), m == selmon and m.sel != null and m.sel.?.tag == i, urg[i]);
-        }
-        x += w;
-    }
-
-    const ltw = TEXTW(&m.layout_symbol);
-    layout_label_width = ltw;
-    d.setScheme(s[SchemeNorm]);
-    x = d.text(x, 0, @intCast(ltw), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), &m.layout_symbol, false);
-
-    const w_remaining = m.window_w - tw - @as(c_int, @intCast(stw)) - x;
-    if (w_remaining > bar_height) {
-        if (m.sel) |sel_cl| {
-            d.setScheme(if (m == selmon) s[SchemeSel] else s[SchemeNorm]);
-            _ = d.text(x, 0, @intCast(w_remaining), @intCast(bar_height), @intCast(@divTrunc(text_lr_pad, 2)), &sel_cl.name, false);
-            if (sel_cl.isfloating) d.rect(x + boxs, boxs, @intCast(boxw), @intCast(boxw), sel_cl.isfixed, false);
-        } else {
-            d.setScheme(s[SchemeNorm]);
-            d.rect(x, 0, @intCast(w_remaining), @intCast(bar_height), true, true);
-        }
-    }
-    d.map(m.barwin, 0, 0, @intCast(m.window_w - @as(c_int, @intCast(stw))), @intCast(bar_height));
-}
-
-/// Redraws the bar on every monitor. Called after global state changes like
-/// focus changes or urgency updates that could affect any monitor's bar.
-fn drawbars() void {
-    var m = mons;
-    while (m) |mon| : (m = mon.next) drawbar(mon);
-}
-
 /// Handles EnterNotify — the pointer crossed into a window. This implements
 /// sloppy focus (focus-follows-mouse): moving the cursor into a window focuses
 /// it. We also switch the active monitor if the pointer enters a window on
@@ -827,7 +727,7 @@ fn expose(e: *x11.XEvent) void {
     const ev = &e.xexpose;
     if (ev.count == 0) {
         if (monitor.fromWindow(ev.window)) |m| {
-            drawbar(m);
+            bar.drawbar(m);
             if (m == selmon) systray.update();
         }
     }
@@ -867,7 +767,7 @@ fn focus(cl: ?*Client) void {
         _ = c.XDeleteProperty(d, root, netatom[NetActiveWindow]);
     }
     if (selmon) |sm| sm.sel = c_focus;
-    drawbars();
+    bar.drawbars();
 }
 
 /// Handles FocusIn events — ensures the selected client keeps X input focus.
@@ -993,7 +893,7 @@ fn getstate(w: x11.Window) c_long {
 /// Handles both plain STRING and compound text encodings (the latter via
 /// XmbTextPropertyToTextList). Used to fetch window titles and the root
 /// window name (which external status programs set as the status text).
-fn gettextprop(w: x11.Window, atom: x11.Atom, text_buf: []u8) bool {
+pub fn gettextprop(w: x11.Window, atom: x11.Atom, text_buf: []u8) bool {
     const d = dpy orelse return false;
     if (text_buf.len == 0) return false;
     text_buf[0] = 0;
@@ -1141,7 +1041,7 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
     if (cl.y + cl.getHeight() > m.monitor_y + m.monitor_h) cl.y = m.monitor_y + m.monitor_h - cl.getHeight();
     cl.x = @max(cl.x, m.monitor_x);
     if (m.bar_y == m.monitor_y and cl.x + @divTrunc(cl.w, 2) >= m.window_x and cl.x + @divTrunc(cl.w, 2) < m.window_x + m.window_w) {
-        cl.y = @max(cl.y, bar_height);
+        cl.y = @max(cl.y, bar.bar_height);
     } else {
         cl.y = @max(cl.y, m.monitor_y);
     }
@@ -1171,7 +1071,7 @@ fn manage(w: x11.Window, wa: *x11.XWindowAttributes) void {
         if (selmon) |sm| unfocus(sm.sel, false);
     }
     m.sel = cl;
-    arrange(m);
+    layout.arrange(m);
     _ = c.XMapWindow(d, cl.window);
     focus(null);
 }
@@ -1205,24 +1105,6 @@ fn maprequest(e: *x11.XEvent) void {
     if (c.XGetWindowAttributes(d, ev.window, &wa) == 0) return;
     if (wa.override_redirect != 0) return;
     if (wintoclient(ev.window) == null) manage(ev.window, &wa);
-}
-
-/// Monocle layout: every tiled window gets the full monitor area. The layout
-/// symbol shows the window count "[N]" so the user knows how many are stacked.
-/// Useful for maximizing screen real estate on small displays.
-pub fn monocle(m: *Monitor) void {
-    var n: c_uint = 0;
-    var cl_it = m.clients;
-    while (cl_it) |cl_c| : (cl_it = cl_c.next) {
-        if (cl_c.isVisible()) n += 1;
-    }
-    if (n > 0) {
-        _ = std.fmt.bufPrint(&m.layout_symbol, "[{d}]", .{n}) catch {};
-    }
-    var c_it = nexttiled(m.clients);
-    while (c_it) |cl_c| : (c_it = nexttiled(cl_c.next)) {
-        resize(cl_c, m.window_x, m.window_y, m.window_w - 2 * cl_c.border_width, m.window_h - 2 * cl_c.border_width, false);
-    }
 }
 
 /// Handles MotionNotify on the root window — tracks which monitor the pointer
@@ -1284,12 +1166,12 @@ pub fn movemouse(_: *const config.Arg) void {
                 } else if (@abs((sm.window_y + sm.window_h) - (ny + cl.getHeight())) < config.snap) {
                     ny = sm.window_y + sm.window_h - cl.getHeight();
                 }
-                if (!cl.isfloating and sm.lt[sm.selected_layout].arrange != null and
+                if (!cl.isfloating and sm.layout.arrange != null and
                     (@abs(nx - cl.x) > @as(c_int, config.snap) or @abs(ny - cl.y) > @as(c_int, config.snap)))
                 {
                     togglefloating(&config.Arg{ .i = 0 });
                 }
-                if (sm.lt[sm.selected_layout].arrange == null or cl.isfloating)
+                if (sm.layout.arrange == null or cl.isfloating)
                     resize(cl, nx, ny, cl.w, cl.h, true);
             },
             x11.ButtonRelease => break,
@@ -1306,17 +1188,6 @@ pub fn movemouse(_: *const config.Arg) void {
     }
 }
 
-/// Skips floating and invisible clients in the client list, returning the next
-/// tiled (non-floating, visible) client. Used by tile/monocle layouts to iterate
-/// only over clients that participate in the layout.
-fn nexttiled(cl: ?*Client) ?*Client {
-    var c_it = cl;
-    while (c_it) |cc| : (c_it = cc.next) {
-        if (!cc.isfloating and cc.isVisible()) return cc;
-    }
-    return null;
-}
-
 /// Moves a client to the head of the client list (making it the new master
 /// in tiled layout), focuses it, and re-arranges. Used by zoom() to promote
 /// a window to the master area.
@@ -1324,7 +1195,7 @@ fn pop(cl: *Client) void {
     cl.detach();
     cl.attach();
     focus(cl);
-    arrange(cl.monitor);
+    layout.arrange(cl.monitor);
 }
 
 /// Handles PropertyNotify events — a window property changed. This is how we
@@ -1348,7 +1219,7 @@ fn propertynotify(e: *x11.XEvent) void {
     }
 
     if (ev.window == root and ev.atom == x11.XA_WM_NAME) {
-        updatestatus();
+        bar.updateStatus();
     } else if (ev.state == x11.PropertyDelete) {
         return;
     } else if (wintoclient(ev.window)) |cl| {
@@ -1357,20 +1228,20 @@ fn propertynotify(e: *x11.XEvent) void {
                 var trans: x11.Window = undefined;
                 if (!cl.isfloating and c.XGetTransientForHint(d, cl.window, &trans) != 0) {
                     cl.isfloating = wintoclient(trans) != null;
-                    if (cl.isfloating) arrange(cl.monitor);
+                    if (cl.isfloating) layout.arrange(cl.monitor);
                 }
             },
             x11.XA_WM_NORMAL_HINTS => cl.updateSizeHints(),
             x11.XA_WM_HINTS => {
                 updatewmhints(cl);
-                drawbars();
+                bar.drawbars();
             },
             else => {},
         }
         if (ev.atom == x11.XA_WM_NAME or ev.atom == netatom[NetWMName]) {
             updatetitle(cl);
             if (cl.monitor) |mon| {
-                if (cl == mon.sel) drawbar(mon);
+                if (cl == mon.sel) bar.drawbar(mon);
             }
         }
         if (ev.atom == netatom[NetWMWindowType]) updatewindowtype(cl);
@@ -1386,7 +1257,7 @@ pub fn quit(_: *const config.Arg) void {
 /// High-level resize: applies size hints to the requested geometry, then calls
 /// resizeclient only if the geometry actually changed. This avoids unnecessary
 /// X server round-trips when the layout re-arranges but nothing actually moved.
-fn resize(cl: *Client, x: c_int, y: c_int, w: c_int, h: c_int, interact: bool) void {
+pub fn resize(cl: *Client, x: c_int, y: c_int, w: c_int, h: c_int, interact: bool) void {
     var xv = x;
     var yv = y;
     var wv = w;
@@ -1451,13 +1322,13 @@ pub fn resizemouse(_: *const config.Arg) void {
                 if (cl.monitor.?.window_x + nw >= sm.window_x and cl.monitor.?.window_x + nw <= sm.window_x + sm.window_w and
                     cl.monitor.?.window_y + nh >= sm.window_y and cl.monitor.?.window_y + nh <= sm.window_y + sm.window_h)
                 {
-                    if (!cl.isfloating and sm.lt[sm.selected_layout].arrange != null and
+                    if (!cl.isfloating and sm.layout.arrange != null and
                         (@abs(nw - cl.w) > @as(c_int, config.snap) or @abs(nh - cl.h) > @as(c_int, config.snap)))
                     {
                         togglefloating(&config.Arg{ .i = 0 });
                     }
                 }
-                if (sm.lt[sm.selected_layout].arrange == null or cl.isfloating)
+                if (sm.layout.arrange == null or cl.isfloating)
                     resize(cl, cl.x, cl.y, nw, nh, true);
             },
             x11.ButtonRelease => break,
@@ -1491,13 +1362,13 @@ fn resizerequest(e: *x11.XEvent) void {
 /// and focused windows are raised above tiled ones; tiled windows are stacked
 /// below the bar window in focus order. Also drains any pending EnterNotify
 /// events to prevent spurious focus changes from the restacking itself.
-fn restack(m: *Monitor) void {
+pub fn restack(m: *Monitor) void {
     const d = dpy orelse return;
-    drawbar(m);
+    bar.drawbar(m);
     const sel = m.sel orelse return;
-    if (sel.isfloating or m.lt[m.selected_layout].arrange == null)
+    if (sel.isfloating or m.layout.arrange == null)
         _ = c.XRaiseWindow(d, sel.window);
-    if (m.lt[m.selected_layout].arrange != null) {
+    if (m.layout.arrange != null) {
         var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
         wc.stack_mode = x11.Below;
         wc.sibling = m.barwin;
@@ -1575,7 +1446,7 @@ fn sendmon(cl: *Client, m: *Monitor) void {
     cl.attach();
     cl.attachStack();
     focus(null);
-    arrange(null);
+    layout.arrange(null);
 }
 
 /// Sends a ClientMessage event to a window. For WM protocol messages (WMDelete,
@@ -1659,29 +1530,23 @@ fn setfullscreen(cl: *Client, fullscreen: bool) void {
         cl.w = cl.oldw;
         cl.h = cl.oldh;
         resizeclient(cl, cl.x, cl.y, cl.w, cl.h);
-        arrange(cl.monitor);
+        layout.arrange(cl.monitor);
     }
 }
 
-/// Keybinding action: switches the active layout. Uses the two-slot layout
-/// toggle: if the requested layout is different from the current one, it swaps
-/// to the alternate slot. If arg.v is null, it toggles between the two most
-/// recent layouts (like Alt-Tab but for layouts).
+/// Keybinding action: switches the active layout to the one specified by arg.v.
 pub fn setlayout(arg: *const config.Arg) void {
     const sm = selmon orelse return;
-    if (arg.v == null or @as(?*const config.Layout, @ptrCast(@alignCast(arg.v))) != sm.lt[sm.selected_layout]) {
-        sm.selected_layout ^= 1;
-    }
     if (arg.v) |v| {
-        sm.lt[sm.selected_layout] = @ptrCast(@alignCast(v));
+        sm.layout = @ptrCast(@alignCast(v));
     }
-    const sym = std.mem.span(sm.lt[sm.selected_layout].symbol);
+    const sym = std.mem.span(sm.layout.symbol);
     @memcpy(sm.layout_symbol[0..sym.len], sym);
     if (sym.len < sm.layout_symbol.len) sm.layout_symbol[sym.len] = 0;
     if (sm.sel != null) {
-        arrange(sm);
+        layout.arrange(sm);
     } else {
-        drawbar(sm);
+        bar.drawbar(sm);
     }
 }
 
@@ -1690,11 +1555,11 @@ pub fn setlayout(arg: *const config.Arg) void {
 /// absolute value (minus 1.0). Clamped to [0.05, 0.95] so neither area disappears.
 pub fn setmfact(arg: *const config.Arg) void {
     const sm = selmon orelse return;
-    if (sm.lt[sm.selected_layout].arrange == null) return;
+    if (sm.layout.arrange == null) return;
     const f = if (arg.f < 1.0) arg.f + sm.master_factor else arg.f - 1.0;
     if (f < 0.05 or f > 0.95) return;
     sm.master_factor = f;
-    arrange(sm);
+    layout.arrange(sm);
 }
 
 /// One-time initialization of the entire WM. Sets up the X connection, creates
@@ -1722,8 +1587,8 @@ pub fn setup() void {
         die("no fonts could be loaded.");
         return;
     }
-    text_lr_pad = @intCast(dr.fonts.?.h);
-    bar_height = @as(c_int, @intCast(dr.fonts.?.h)) + 2;
+    bar.text_lr_pad = @intCast(dr.fonts.?.h);
+    bar.bar_height = @as(c_int, @intCast(dr.fonts.?.h)) + 2;
     _ = monitor.updateGeometry();
 
     // init atoms
@@ -1765,8 +1630,8 @@ pub fn setup() void {
     // init system tray
     systray.update();
     // init bars
-    updatebars();
-    updatestatus();
+    bar.updateBars();
+    bar.updateStatus();
 
     // supporting window for NetWMCheck
     wmcheckwin = c.XCreateSimpleWindow(d, root, 0, 0, 1, 1, 0, 0, 0);
@@ -1787,25 +1652,6 @@ pub fn setup() void {
     _ = c.XSelectInput(d, root, wa.event_mask);
     grabkeys();
     focus(null);
-}
-
-/// Recursively shows visible clients and hides invisible ones by walking the
-/// focus stack. Visible clients are moved to their actual position; invisible
-/// ones are moved off-screen (x = -2 * width). This is called before layout
-/// arrange so that hidden windows don't interfere with tiling calculations.
-/// Floating/non-fullscreen clients are also resized to enforce size hints.
-fn showhide(cl: ?*Client) void {
-    const d = dpy orelse return;
-    const cl_c = cl orelse return;
-    if (cl_c.isVisible()) {
-        _ = c.XMoveWindow(d, cl_c.window, cl_c.x, cl_c.y);
-        if ((cl_c.monitor != null and cl_c.monitor.?.lt[cl_c.monitor.?.selected_layout].arrange == null or cl_c.isfloating) and !cl_c.isfullscreen)
-            resize(cl_c, cl_c.x, cl_c.y, cl_c.w, cl_c.h, false);
-        showhide(cl_c.snext);
-    } else {
-        showhide(cl_c.snext);
-        _ = c.XMoveWindow(d, cl_c.window, cl_c.getWidth() * -2, cl_c.y);
-    }
 }
 
 /// SIGCHLD handler: reaps zombie child processes. Spawned programs (dmenu,
@@ -1866,7 +1712,7 @@ pub fn tag(arg: *const config.Arg) void {
     const new_tag: u5 = @intCast(arg.ui);
     sel.tag = new_tag;
     focus(null);
-    arrange(sm);
+    layout.arrange(sm);
 }
 
 /// Keybinding action: sends the focused window to the next/previous monitor.
@@ -1877,37 +1723,6 @@ pub fn tagmon(arg: *const config.Arg) void {
     _ = sel;
     if (mons == null or mons.?.next == null) return;
     if (monitor.adjacent(arg.i)) |m| sendmon(sm.sel.?, m);
-}
-
-/// Master-stack tiling layout (the default "[]=" layout). Splits the monitor
-/// into a left master area and right stack area based on master_factor. The
-/// first client fills the master area; the rest fill the stack area (split
-/// vertically). This is dwm's signature layout — efficient for coding with
-/// one main editor and several terminals.
-pub fn tile(m: *Monitor) void {
-    var n: c_uint = 0;
-    var cl_it = nexttiled(m.clients);
-    while (cl_it) |cl_c| : (cl_it = nexttiled(cl_c.next)) n += 1;
-    if (n == 0) return;
-
-    const mw: c_int = if (n > 1)
-        @intFromFloat(@as(f32, @floatFromInt(m.window_w)) * m.master_factor)
-    else
-        m.window_w;
-
-    var i: c_uint = 0;
-    var ty: c_int = 0;
-    cl_it = nexttiled(m.clients);
-    while (cl_it) |cl_c| : (cl_it = nexttiled(cl_c.next)) {
-        if (i == 0) {
-            resize(cl_c, m.window_x, m.window_y, mw - (2 * cl_c.border_width), m.window_h - (2 * cl_c.border_width), false);
-        } else {
-            const h = @divTrunc(m.window_h - ty, @as(c_int, @intCast(n - i)));
-            resize(cl_c, m.window_x + mw, m.window_y + ty, m.window_w - mw - (2 * cl_c.border_width), h - (2 * cl_c.border_width), false);
-            if (ty + cl_c.getHeight() < m.window_h) ty += cl_c.getHeight();
-        }
-        i += 1;
-    }
 }
 
 /// Keybinding action: shows or hides the status bar. Updates the bar position,
@@ -1922,14 +1737,14 @@ pub fn togglebar(_: *const config.Arg) void {
     if (systray.ptr) |st| {
         var wc: x11.XWindowChanges = std.mem.zeroes(x11.XWindowChanges);
         if (!sm.showbar) {
-            wc.y = -bar_height;
+            wc.y = -bar.bar_height;
         } else {
             wc.y = 0;
-            if (!sm.topbar) wc.y = sm.monitor_h - bar_height;
+            if (!sm.topbar) wc.y = sm.monitor_h - bar.bar_height;
         }
         _ = c.XConfigureWindow(d, st.win, x11.CWY, &wc);
     }
-    arrange(sm);
+    layout.arrange(sm);
 }
 
 /// Keybinding action: toggles the focused window between floating and tiled.
@@ -1942,7 +1757,7 @@ pub fn togglefloating(_: *const config.Arg) void {
     sel.isfloating = !sel.isfloating or sel.isfixed;
     if (sel.isfloating)
         resize(sel, sel.x, sel.y, sel.w, sel.h, false);
-    arrange(sm);
+    layout.arrange(sm);
 }
 
 /// Keybinding action: XORs the focused window's tag bitmask with the given tag.
@@ -1986,7 +1801,7 @@ fn unmanage(cl: *Client, destroyed: bool) void {
     alloc.destroy(cl);
     focus(null);
     updateclientlist();
-    arrange(m);
+    layout.arrange(m);
 }
 
 /// Handles UnmapNotify — a window was unmapped. If it was a send_event (the
@@ -2004,32 +1819,6 @@ fn unmapnotify(e: *x11.XEvent) void {
     } else if (systray.wintosystrayicon(ev.window)) |icon| {
         _ = c.XMapRaised(dpy.?, icon.window);
         systray.update();
-    }
-}
-
-/// Creates the X bar window for any monitor that doesn't have one yet. Each
-/// bar is an override-redirect window (so the WM doesn't try to manage it)
-/// with ParentRelative background (inherits root pixmap for pseudo-transparency).
-/// Also maps the systray window on the appropriate monitor.
-fn updatebars() void {
-    const d = dpy orelse return;
-    var wa: x11.XSetWindowAttributes = std.mem.zeroes(x11.XSetWindowAttributes);
-    wa.override_redirect = x11.True;
-    wa.background_pixmap = x11.ParentRelative;
-    wa.event_mask = x11.ButtonPressMask | x11.ExposureMask;
-    var ch: x11.XClassHint = .{ .res_name = @constCast("dwm"), .res_class = @constCast("dwm") };
-    var m = mons;
-    while (m) |mon| : (m = mon.next) {
-        if (mon.barwin != 0) continue;
-        var w: c_uint = @intCast(mon.window_w);
-        if (systray.systraytomon(mon) == mon) w -= systray.getsystraywidth();
-        mon.barwin = c.XCreateWindow(d, root, mon.window_x, mon.bar_y, w, @intCast(bar_height), 0, @intCast(c.DefaultDepth(d, screen)), x11.CopyFromParent, c.DefaultVisual(d, screen), x11.CWOverrideRedirect | x11.CWBackPixmap | x11.CWEventMask, &wa);
-        if (cursor[CurNormal]) |cur| _ = c.XDefineCursor(d, mon.barwin, cur.cursor);
-        if (systray.systraytomon(mon) == mon) {
-            if (systray.ptr) |st| _ = c.XMapRaised(d, st.win);
-        }
-        _ = c.XMapRaised(d, mon.barwin);
-        _ = c.XSetClassHint(d, mon.barwin, &ch);
     }
 }
 
@@ -2064,19 +1853,6 @@ fn updatenumlockmask() void {
                 numlockmask = @as(c_uint, 1) << @intCast(i);
         }
     }
-}
-
-/// Reads the root window's WM_NAME property as the status bar text. External
-/// tools like slstatus/xsetroot set this property, and we display it in the
-/// bar's status area. Falls back to "dwm-VERSION" if no name is set.
-fn updatestatus() void {
-    if (!gettextprop(root, x11.XA_WM_NAME, &status_text)) {
-        const default_status = "dwm-" ++ VERSION;
-        @memcpy(status_text[0..default_status.len], default_status);
-        status_text[default_status.len] = 0;
-    }
-    if (selmon) |sm| drawbar(sm);
-    systray.update();
 }
 
 /// Reads the client's title from _NET_WM_NAME (UTF-8) or falls back to
@@ -2132,7 +1908,7 @@ pub fn view(arg: *const config.Arg) void {
     if (new_tag == sm.tag) return;
     sm.tag = new_tag;
     focus(null);
-    arrange(sm);
+    layout.arrange(sm);
 }
 
 /// Looks up a Client by its X window ID across all monitors. Returns null if
@@ -2155,9 +1931,9 @@ pub fn wintoclient(w: x11.Window) ?*Client {
 pub fn zoom(_: *const config.Arg) void {
     const sm = selmon orelse return;
     var cl = sm.sel orelse return;
-    if (sm.lt[sm.selected_layout].arrange == null or (sm.sel != null and sm.sel.?.isfloating)) return;
-    if (cl == nexttiled(sm.clients)) {
-        cl = nexttiled(cl.next) orelse return;
+    if (sm.layout.arrange == null or (sm.sel != null and sm.sel.?.isfloating)) return;
+    if (cl == layout.nextTiled(sm.clients)) {
+        cl = layout.nextTiled(cl.next) orelse return;
     }
     pop(cl);
 }

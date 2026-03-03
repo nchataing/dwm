@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const options = b.addOptions();
+    options.addOption([]const u8, "version", "0.1");
     options.addOption([]const u8, "backlight_brightness", b.fmt("/sys/class/backlight/{s}/brightness", .{backlight_name}));
     options.addOption([]const u8, "backlight_max_brightness", b.fmt("/sys/class/backlight/{s}/max_brightness", .{backlight_name}));
     options.addOption([]const u8, "battery_status", b.fmt("/sys/class/power_supply/{s}/status", .{battery_name}));

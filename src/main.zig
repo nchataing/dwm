@@ -13,10 +13,11 @@
 const std = @import("std");
 const x11 = @import("x11.zig");
 const dwm = @import("dwm.zig");
+const config = @import("config");
 
 const c = x11.c;
 
-const VERSION = "6.3";
+const VERSION = config.version;
 
 pub fn main(init: std.process.Init.Minimal) void {
     // Parse arguments

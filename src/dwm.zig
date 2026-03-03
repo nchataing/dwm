@@ -21,9 +21,10 @@ const focus_mod = @import("focus.zig");
 const events = @import("events.zig");
 const colors = @import("colors.zig");
 const status = @import("status.zig");
+const config = @import("config");
 const c = x11.c;
 
-pub const VERSION = "6.3";
+pub const VERSION = config.version;
 
 // --- Cursor indices into the global cursor array ---
 pub const CurNormal = 0; // default pointer (arrow)

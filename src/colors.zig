@@ -27,4 +27,6 @@ pub const bat_charging: [*:0]const u8 = "#89b4fa"; // blue — charging
 
 pub const brightness_fg: [*:0]const u8 = gray3; // same as time
 
+pub const btc_fg: [*:0]const u8 = "#f7931a"; // official Bitcoin orange
+
 pub const time_fg: [*:0]const u8 = gray3;

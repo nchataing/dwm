@@ -11,6 +11,7 @@
 const std = @import("std");
 const drw = @import("drw.zig");
 const colors = @import("colors.zig");
+const config = @import("config");
 
 const c = @cImport({
     @cInclude("time.h");
@@ -44,6 +45,7 @@ var col_bat_normal: drw.Color = undefined;
 var col_bat_warning: drw.Color = undefined;
 var col_bat_critical: drw.Color = undefined;
 var col_bat_charging: drw.Color = undefined;
+var col_btc_fg: drw.Color = undefined;
 var col_brightness_fg: drw.Color = undefined;
 var col_time_fg: drw.Color = undefined;
 var col_status_bg: drw.Color = undefined;
@@ -55,6 +57,7 @@ pub fn initColors(d: *drw.DrawContext) void {
     d.colorCreate(&col_bat_warning, colors.bat_warning);
     d.colorCreate(&col_bat_critical, colors.bat_critical);
     d.colorCreate(&col_bat_charging, colors.bat_charging);
+    d.colorCreate(&col_btc_fg, colors.btc_fg);
     d.colorCreate(&col_brightness_fg, colors.brightness_fg);
     d.colorCreate(&col_time_fg, colors.time_fg);
     d.colorCreate(&col_status_bg, colors.status_bg);
@@ -73,8 +76,9 @@ const bat_icon_map = std.StaticStringMap([]const u8).initComptime(.{
 
 /// Read a sysfs file into `buf`, stripping a trailing newline. Returns the
 /// slice on success, or an empty string on any error.
-fn readSysFile(buf: []u8, comptime path: [*:0]const u8) []const u8 {
-    const file_fd = std.c.open(path, .{});
+fn readSysFile(buf: []u8, comptime path: []const u8) []const u8 {
+    const path_z: [*:0]const u8 = (path ++ .{0})[0..path.len :0];
+    const file_fd = std.c.open(path_z, .{});
     if (file_fd < 0) return "";
     defer _ = std.c.close(file_fd);
     const n = std.c.read(file_fd, buf.ptr, buf.len);
@@ -88,6 +92,102 @@ fn readSysFile(buf: []u8, comptime path: [*:0]const u8) []const u8 {
 
 const SegmentFn = *const fn (*Block) bool;
 
+// ── Bitcoin price ───────────────────────────────────────────────────────────
+
+const btc_interval: u32 = 300; // fetch every 300 ticks (5 minutes)
+var btc_tick: u32 = btc_interval; // start at interval so first update() triggers a fetch
+
+const btc_cache_path: []const u8 = "/tmp/dwm_btc_price";
+
+/// Fork a child that runs curl to fetch BTC price into the cache file.
+/// Non-blocking: the parent returns immediately.
+fn forkBtcFetch() void {
+    const pid = std.c.fork();
+    if (pid == 0) {
+        // child — close X connection, setsid, exec curl
+        const x11 = @import("x11.zig");
+        const d = @import("dwm.zig");
+        if (d.dpy) |dp| std.posix.close(@intCast(x11.c.ConnectionNumber(dp)));
+        _ = std.c.setsid();
+        const argv = [_:null]?[*:0]const u8{
+            "sh", "-c", "curl -sf 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=eur' > /tmp/dwm_btc_price.tmp && mv /tmp/dwm_btc_price.tmp /tmp/dwm_btc_price",
+            null,
+        };
+        _ = x11.c.execvp("sh", @ptrCast(&argv));
+        std.process.exit(0);
+    }
+}
+
+/// Parse the price from the cached JSON file and format e.g. "₿ 62,340".
+fn getBtc(block: *Block) bool {
+    var file_buf: [256]u8 = undefined;
+    const json = readSysFile(&file_buf, btc_cache_path);
+    if (json.len == 0) {
+        const text = std.fmt.bufPrint(&block.text, "\xe2\x82\xbf ---", .{}) catch return false;
+        block.text[text.len] = 0;
+        block.colors[0] = col_btc_fg;
+        block.colors[1] = col_status_bg;
+        return true;
+    }
+
+    // Simple scan for "eur": followed by a number.
+    // JSON looks like: {"bitcoin":{"eur":62340.5}}  or  {"bitcoin":{"eur":62340}}
+    const needle = "\"eur\":";
+    const pos = std.mem.indexOf(u8, json, needle) orelse {
+        const text = std.fmt.bufPrint(&block.text, "\xe2\x82\xbf ---", .{}) catch return false;
+        block.text[text.len] = 0;
+        block.colors[0] = col_btc_fg;
+        block.colors[1] = col_status_bg;
+        return true;
+    };
+
+    // Extract the numeric part (digits and '.') after "eur":
+    var start = pos + needle.len;
+    // skip whitespace
+    while (start < json.len and json[start] == ' ') start += 1;
+    var end = start;
+    while (end < json.len and (json[end] >= '0' and json[end] <= '9' or json[end] == '.')) end += 1;
+    if (end == start) {
+        const text = std.fmt.bufPrint(&block.text, "\xe2\x82\xbf ---", .{}) catch return false;
+        block.text[text.len] = 0;
+        block.colors[0] = col_btc_fg;
+        block.colors[1] = col_status_bg;
+        return true;
+    }
+
+    // Parse as float, round to integer
+    const price_f = std.fmt.parseFloat(f64, json[start..end]) catch {
+        const text = std.fmt.bufPrint(&block.text, "\xe2\x82\xbf ---", .{}) catch return false;
+        block.text[text.len] = 0;
+        block.colors[0] = col_btc_fg;
+        block.colors[1] = col_status_bg;
+        return true;
+    };
+    const price: u64 = @intFromFloat(@round(price_f));
+
+    // Format with thousand separator: e.g. 62340 -> "62,340"
+    var num_buf: [32]u8 = undefined;
+    const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{price}) catch return false;
+
+    var fmt_buf: [48]u8 = undefined;
+    var fi: usize = 0;
+    for (num_str, 0..) |ch, idx| {
+        if (idx > 0 and (num_str.len - idx) % 3 == 0) {
+            fmt_buf[fi] = ',';
+            fi += 1;
+        }
+        fmt_buf[fi] = ch;
+        fi += 1;
+    }
+
+    const text = std.fmt.bufPrint(&block.text, "\xe2\x82\xbf {s}", .{fmt_buf[0..fi]}) catch return false;
+    block.text[text.len] = 0;
+    block.colors[0] = col_btc_fg;
+    block.colors[1] = col_status_bg;
+    block.onClick = &forkBtcFetch;
+    return true;
+}
+
 // ── Brightness ──────────────────────────────────────────────────────────────
 
 const brightness_presets = [_]u8{ 25, 10, 3 };
@@ -95,8 +195,8 @@ const brightness_presets = [_]u8{ 25, 10, 3 };
 fn getBrightness(block: *Block) bool {
     var cur_buf: [16]u8 = undefined;
     var max_buf: [16]u8 = undefined;
-    const cur_str = readSysFile(&cur_buf, "/sys/class/backlight/intel_backlight/brightness");
-    const max_str = readSysFile(&max_buf, "/sys/class/backlight/intel_backlight/max_brightness");
+    const cur_str = readSysFile(&cur_buf, config.backlight_brightness);
+    const max_str = readSysFile(&max_buf, config.backlight_max_brightness);
 
     const cur = std.fmt.parseInt(u32, cur_str, 10) catch return false;
     const max = std.fmt.parseInt(u32, max_str, 10) catch return false;
@@ -116,8 +216,8 @@ fn onClickBrightness() void {
     // Read current brightness percentage
     var cur_buf: [16]u8 = undefined;
     var max_buf: [16]u8 = undefined;
-    const cur_str = readSysFile(&cur_buf, "/sys/class/backlight/intel_backlight/brightness");
-    const max_str = readSysFile(&max_buf, "/sys/class/backlight/intel_backlight/max_brightness");
+    const cur_str = readSysFile(&cur_buf, config.backlight_brightness);
+    const max_str = readSysFile(&max_buf, config.backlight_max_brightness);
     const cur = std.fmt.parseInt(u32, cur_str, 10) catch return;
     const max = std.fmt.parseInt(u32, max_str, 10) catch return;
     if (max == 0) return;
@@ -155,9 +255,9 @@ fn onClickBrightness() void {
 fn getBattery(block: *Block) bool {
     var status_buf: [64]u8 = undefined;
     var cap_buf: [16]u8 = undefined;
-    const status = readSysFile(&status_buf, "/sys/class/power_supply/BAT0/status");
+    const status = readSysFile(&status_buf, config.battery_status);
     const icon = bat_icon_map.get(status) orelse "?";
-    const capacity = readSysFile(&cap_buf, "/sys/class/power_supply/BAT0/capacity");
+    const capacity = readSysFile(&cap_buf, config.battery_capacity);
 
     // Format text
     const text = std.fmt.bufPrint(&block.text, "{s} {s}%", .{ icon, capacity }) catch return false;
@@ -197,6 +297,7 @@ fn getTime(block: *Block) bool {
 }
 
 const segments: []const SegmentFn = &.{
+    &getBtc,
     &getBrightness,
     &getBattery,
     &getTime,
@@ -245,10 +346,17 @@ pub fn init() void {
 }
 
 /// Drain the timerfd (must be called when poll reports it readable).
+/// Also ticks the BTC fetch counter and forks curl when it expires.
 pub fn acknowledge() void {
     if (timer_fd < 0) return;
     var buf: [8]u8 = undefined;
     _ = std.c.read(timer_fd, &buf, 8);
+
+    btc_tick += 1;
+    if (btc_tick >= btc_interval) {
+        btc_tick = 0;
+        forkBtcFetch();
+    }
 }
 
 /// Returns the timerfd for use in a poll set, or -1 if unavailable.
